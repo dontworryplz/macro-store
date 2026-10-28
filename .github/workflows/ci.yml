@@ -66,6 +66,9 @@ jobs:
       - name: Check JavaScript syntax
         run: for file in ui/*.js; do node --check "$file"; done
 
+      - name: Check UI wiring
+        run: node scripts/check-ui.mjs
+
       - name: Check Rust formatting
         working-directory: src-tauri
         run: cargo fmt --all -- --check
