@@ -90,9 +90,16 @@
               <path d="m7 7 10 10M17 7 7 17" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
             </svg>
           </button>
+          <div id="searchHistory" class="search-history" role="listbox" aria-label="Son aramalar" hidden></div>
         </div>
 
         <div class="topbar-actions">
+          <button id="shortcutsButton" class="icon-btn" type="button" title="Klavye kısayolları" aria-label="Klavye kısayolları">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <rect x="3.5" y="6.5" width="17" height="11" rx="2" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M6.5 9.5h1M10 9.5h1M13.5 9.5h1M17 9.5h.5M6.5 12.5h1M10 12.5h1M13.5 12.5h1M17 12.5h.5M8 15.5h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+          </button>
           <button id="refreshButton" class="icon-btn" type="button" title="Yenile" aria-label="Yenile">
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
               <path d="M19 12a7 7 0 1 1-2.1-5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
@@ -189,6 +196,53 @@
         <button class="btn btn-ghost" type="button" data-close-modal="confirmModal">Vazgeç</button>
         <button id="confirmAccept" class="btn btn-primary" type="button">Devam et</button>
       </div>
+    </div>
+  </div>
+
+  <div id="shortcutsModal" class="modal" hidden>
+    <div class="modal-card shortcuts-card" role="dialog" aria-modal="true" aria-labelledby="shortcutsTitle">
+      <header class="modal-head">
+        <div class="modal-title">
+          <h2 id="shortcutsTitle">Klavye kısayolları</h2>
+          <p>Mağazayı klavyeyle kullanın</p>
+        </div>
+        <button class="icon-btn" type="button" data-close-modal="shortcutsModal" aria-label="Kapat">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="m7 7 10 10M17 7 7 17" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </header>
+      <dl class="shortcuts-list">
+        <div><dt><kbd>/</kbd></dt><dd>Aramaya odaklan</dd></div>
+        <div><dt><kbd>Esc</kbd></dt><dd>Geri dön veya pencereyi kapat</dd></div>
+        <div><dt><kbd>Alt</kbd> + <kbd>←</kbd></dt><dd>Önceki ekrana dön</dd></div>
+        <div><dt><kbd>Enter</kbd> / <kbd>Boşluk</kbd></dt><dd>Seçili kartı aç</dd></div>
+        <div><dt><kbd>?</kbd> / <kbd>F1</kbd></dt><dd>Bu yardım penceresini aç</dd></div>
+      </dl>
+      <footer class="shortcuts-foot">
+        <span>İpucu: Arama kutusundayken <kbd>Esc</kbd> aramayı temizler.</span>
+      </footer>
+    </div>
+  </div>
+
+  <div id="cliModal" class="modal" hidden>
+    <div class="modal-card cli-card" role="dialog" aria-modal="true" aria-labelledby="cliTitle" aria-describedby="cliSubtitle">
+      <header class="modal-head">
+        <div class="modal-title">
+          <h2 id="cliTitle">CLI komutları</h2>
+          <p id="cliSubtitle">Terminalden yönet</p>
+        </div>
+        <button class="icon-btn" type="button" data-close-modal="cliModal" aria-label="Kapat">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="m7 7 10 10M17 7 7 17" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </header>
+      <div id="cliBody" class="cli-body"></div>
+      <footer class="cli-foot">
+        <span>Komutları kopyalayıp terminalinize yapıştırın.</span>
+        <button id="cliCopyAll" class="btn btn-ghost btn-sm" type="button">Tümünü kopyala</button>
+      </footer>
     </div>
   </div>
 

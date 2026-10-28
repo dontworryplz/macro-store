@@ -28,7 +28,14 @@ kurmak için çağrılır.
 - Sağlayıcı filtrelerinde sonuç sayacı; yüklü uygulamalar ad, güncelleme ve
   sağlayıcıya göre sıralanabilir.
 - Uygulama ayrıntılarında Flatpak, Snap ve Homebrew için kurulum komutu
-  kopyalanabilir.
+  kopyalanabilir; CLI komutları penceresinde kurulum, güncelleme, kaldırma ve
+  bilgi komutları topluca görüntülenir.
+- Kitaplıkta seçim modu ile birden çok uygulama seçilip sırayla kaldırılabilir;
+  toplu işlemler onay ister ve iptal edilebilir.
+- Kitaplık başlığında sağlayıcı dağılımı ve son kontrol saati gösterilir.
+- Arama geçmişi yerel olarak saklanır; son aramalar arama kutusunda önerilir.
+- Flatpak uygulama izinleri ve son sürüm geçmişi ayrıntı ekranında gösterilir.
+- `?` / `F1` ile klavye kısayolları penceresi açılır.
 - Snap izleme kanalı ve Homebrew sabitlenmiş formula durumu uygulama
   ayrıntılarında gösterilir.
 - **Yenile** sağlayıcı önbelleklerini temizler; normal listeleme 15 saniyelik

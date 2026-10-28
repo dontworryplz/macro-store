@@ -2445,8 +2445,445 @@ html[data-theme="light"] .sk {
 .lightbox-prev { left: 16px; }
 .lightbox-next { right: 16px; }
 
-/* ── Duyarlılık ───────────────────────────────────── */
+/* ── Arama geçmişi ────────────────────────────────── */
 
+.search-history {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 11px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.search-history[hidden] { display: none; }
+
+.search-history-label {
+  padding: 5px 8px 3px;
+  color: var(--muted-2);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.search-history button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 32px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: var(--text-soft);
+  font-size: 11px;
+  text-align: left;
+}
+
+.search-history button:hover,
+.search-history button:focus-visible {
+  background: var(--surface-3);
+  color: var(--text);
+  outline: none;
+}
+
+.search-history button svg {
+  width: 13px;
+  height: 13px;
+  color: var(--muted-2);
+  flex: 0 0 auto;
+}
+
+.search-history button span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Kısayol yardımı ──────────────────────────────── */
+
+.shortcuts-card {
+  width: min(460px, 92vw);
+  padding-bottom: 4px;
+}
+
+.shortcuts-list {
+  margin: 0;
+  padding: 8px 18px 4px;
+}
+
+.shortcuts-list > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.shortcuts-list > div:last-child { border-bottom: 0; }
+.shortcuts-list dt { display: flex; align-items: center; gap: 4px; margin: 0; }
+.shortcuts-list dd { margin: 0; color: var(--muted); font-size: 10.5px; text-align: right; }
+
+kbd {
+  display: inline-grid;
+  place-items: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid var(--line-strong);
+  border-bottom-width: 2px;
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text-soft);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.shortcuts-foot {
+  padding: 10px 18px;
+  border-top: 1px solid var(--line);
+  color: var(--muted-2);
+  font-size: 10px;
+}
+
+/* ── Kitaplık seçim ve özet ───────────────────────── */
+
+.app-row.is-selectable { grid-template-columns: 26px 46px minmax(0, 1fr); cursor: pointer; }
+.app-row.is-selected {
+  border-color: var(--line-strong);
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+}
+
+.select-check {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--bg);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.app-row.is-selected .select-check {
+  border-color: var(--text);
+  background: var(--text);
+}
+
+.library-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 10px;
+  margin: 5px 0 0;
+  color: var(--muted-2);
+  font-size: 10.5px;
+}
+
+.library-summary .dot { opacity: 0.55; }
+
+.selection-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.selection-count {
+  align-self: center;
+  color: var(--muted-2);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── CLI komutları ────────────────────────────────── */
+
+.cli-box {
+  margin-top: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+
+.cli-box summary {
+  padding: 9px 12px;
+  color: var(--text-soft);
+  font-size: 10.5px;
+  font-weight: 650;
+  cursor: pointer;
+  list-style: none;
+}
+
+.cli-box summary::-webkit-details-marker { display: none; }
+.cli-box summary::before { content: "▸ "; color: var(--muted-2); }
+.cli-box[open] summary::before { content: "▾ "; }
+.cli-box summary:hover { color: var(--text); }
+
+.cli-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 0 12px 12px;
+}
+
+.cli-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cli-row code {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--sidebar-bg);
+  color: var(--text-soft);
+  font-family: var(--mono);
+  font-size: 9.5px;
+  white-space: nowrap;
+  scrollbar-width: thin;
+}
+
+.cli-label {
+  flex: 0 0 54px;
+  color: var(--muted-2);
+  font-size: 9.5px;
+  font-weight: 650;
+}
+
+/* ── İzinler ve sürüm geçmişi ─────────────────────── */
+
+.permissions-card,
+.releases-card {
+  padding: 14px 15px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+
+.permissions-card h2,
+.releases-card h2 {
+  margin: 0 0 10px;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.permissions-empty,
+.permissions-note {
+  margin: 0;
+  color: var(--muted-2);
+  font-size: 10.5px;
+  line-height: 1.55;
+}
+
+.permission-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.permission-group {
+  padding-top: 9px;
+  border-top: 1px solid var(--line);
+}
+
+.permission-group:first-child { padding-top: 0; border-top: 0; }
+.permission-group h3 {
+  margin: 0 0 5px;
+  color: var(--muted);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.permission-row {
+  display: flex;
+  gap: 8px;
+  padding: 2px 0;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.permission-row dt { flex: 0 0 88px; color: var(--muted-2); }
+.permission-row dd { margin: 0; color: var(--text-soft); word-break: break-word; }
+
+.release-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.release-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 10.5px;
+}
+
+.release-row strong { color: var(--text-soft); font-weight: 650; }
+.release-row span { color: var(--muted-2); font-size: 9.5px; }
+
+/* ── CLI penceresi ────────────────────────────────── */
+
+.cli-card {
+  width: min(560px, 92vw);
+}
+
+.cli-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 18px;
+  overflow-y: auto;
+}
+
+.cli-command {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cli-command .cli-label {
+  flex: 0 0 60px;
+}
+
+.cli-command code {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--sidebar-bg);
+  color: var(--text-soft);
+  font-family: var(--mono);
+  font-size: 10px;
+  white-space: nowrap;
+  scrollbar-width: thin;
+}
+
+.cli-command .icon-btn {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+}
+
+.cli-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 18px;
+  border-top: 1px solid var(--line);
+  color: var(--muted-2);
+  font-size: 10px;
+}
+
+/* ── İzin listesi ve sürüm zaman çizelgesi ────────── */
+
+.permission-note {
+  margin: 0 0 8px;
+  color: var(--muted-2);
+  font-size: 10.5px;
+  line-height: 1.55;
+}
+
+.permission-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.permission-list li {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  font-size: 10.5px;
+  line-height: 1.45;
+}
+
+.permission-key {
+  flex: 0 0 108px;
+  color: var(--muted-2);
+}
+
+.permission-values {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.permission-chip {
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--sidebar-bg);
+  color: var(--text-soft);
+  font-size: 9.5px;
+}
+
+.release-list li {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  padding: 2px 0;
+}
+
+.release-marker {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--line-strong);
+}
+
+.release-list li:first-child .release-marker {
+  background: var(--accent);
+}
+
+.release-list li > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 10.5px;
+}
+
+.release-list strong { color: var(--text-soft); font-weight: 650; }
+.release-date { color: var(--muted-2); font-size: 9.5px; }
+
+.view-sub .dot {
+  margin: 0 3px;
+  opacity: 0.55;
+}
+
+/* ── Duyarlılık ───────────────────────────────────── */
 @media (max-width: 1080px) {
   :root { --sidebar-w: 200px; }
   .main { padding: 26px 26px 82px; }
@@ -2485,7 +2922,9 @@ html[data-theme="light"] .sk {
   .hero-content { padding: 22px; }
   .hero-identity .app-icon { width: 52px; height: 52px; }
   .app-row { grid-template-columns: 46px minmax(0, 1fr); }
+  .app-row.is-selectable { grid-template-columns: 24px 42px minmax(0, 1fr); }
   .app-actions { grid-column: 1 / -1; justify-content: flex-end; }
+  .app-row.is-selectable .app-actions { grid-column: 1 / -1; }
   .detail-hero { flex-direction: column; }
   .detail-hero .app-icon { width: 76px; height: 76px; }
   .shots { grid-template-columns: 1fr; }

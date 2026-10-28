@@ -193,6 +193,13 @@ struct ReviewItem {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ReleaseItem {
+    version: String,
+    date: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct AppDetail {
     app: AppItem,
     description: String,
@@ -206,6 +213,15 @@ struct AppDetail {
     installs_last_month: Option<u64>,
     rating: Option<RatingSummary>,
     reviews: Vec<ReviewItem>,
+    releases: Vec<ReleaseItem>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppPermissions {
+    installed: bool,
+    available: bool,
+    raw: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -418,6 +434,8 @@ struct ApiScreenshot {
 struct ApiRelease {
     #[serde(default)]
     version: Option<String>,
+    #[serde(default)]
+    timestamp: Option<Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1335,6 +1353,28 @@ fn verified(appstream: &Appstream) -> bool {
         .unwrap_or(false)
 }
 
+fn release_items(releases: &[ApiRelease]) -> Vec<ReleaseItem> {
+    releases
+        .iter()
+        .filter_map(|release| {
+            let version = release.version.as_deref()?.trim();
+            if version.is_empty() {
+                return None;
+            }
+            Some(ReleaseItem {
+                version: version.to_string(),
+                date: release.timestamp.as_ref().and_then(|value| {
+                    value
+                        .as_str()
+                        .and_then(|text| text.parse::<i64>().ok())
+                        .or_else(|| value.as_i64())
+                }),
+            })
+        })
+        .take(8)
+        .collect()
+}
+
 async fn fetch_appstream_item(
     id: String,
     installed: &HashSet<String>,
@@ -1876,6 +1916,7 @@ async fn get_app_detail(app_id: String, provider: String) -> Result<AppDetail, S
                 installs_last_month: None,
                 rating: None,
                 reviews: Vec::new(),
+                releases: Vec::new(),
             })
         }
         "brew" => {
@@ -1895,10 +1936,54 @@ async fn get_app_detail(app_id: String, provider: String) -> Result<AppDetail, S
                 installs_last_month: None,
                 rating: None,
                 reviews: Vec::new(),
+                releases: Vec::new(),
             })
         }
         _ => Err("Paket sağlayıcısı geçersiz.".to_string()),
     }
+}
+
+#[tauri::command]
+async fn get_app_permissions(app_id: String) -> Result<AppPermissions, String> {
+    if !valid_flatpak_id(&app_id) {
+        return Err("Uygulama kimliği geçersiz.".to_string());
+    }
+    let flatpak_available = tokio::task::spawn_blocking(flatpak_available)
+        .await
+        .map_err(|err| format!("Flatpak durumu arka planda okunamadı: {err}"))?;
+    if !flatpak_available {
+        return Ok(AppPermissions {
+            installed: false,
+            available: false,
+            raw: String::new(),
+        });
+    }
+    if !flatpak_snapshot_async().await?.installed.contains(&app_id) {
+        return Ok(AppPermissions {
+            installed: false,
+            available: true,
+            raw: String::new(),
+        });
+    }
+
+    let id = app_id.clone();
+    let output = tokio::task::spawn_blocking(move || {
+        run_capture(
+            "flatpak",
+            &["info", "--user", "--show-permissions", id.as_str()],
+        )
+    })
+    .await
+    .map_err(|err| format!("Flatpak izinleri arka planda okunamadı: {err}"))??;
+    if !output.success {
+        return Err(failure_message("flatpak info", &output));
+    }
+
+    Ok(AppPermissions {
+        installed: true,
+        available: true,
+        raw: truncate_chars(output.stdout.trim(), 12000),
+    })
 }
 
 async fn get_flatpak_app_detail(app_id: String) -> Result<AppDetail, String> {
@@ -1935,6 +2020,7 @@ async fn get_flatpak_app_detail(app_id: String) -> Result<AppDetail, String> {
         .first()
         .and_then(|release| release.version.clone())
         .unwrap_or_default();
+    let releases = release_items(&appstream.releases);
     let is_installed = snapshot.installed.contains(&app_id);
     let monthly_installs = stats.and_then(|value| value.installs_last_month);
     let app = AppItem {
@@ -2054,6 +2140,7 @@ async fn get_flatpak_app_detail(app_id: String) -> Result<AppDetail, String> {
         installs_last_month: monthly_installs,
         rating,
         reviews: review_items,
+        releases,
     })
 }
 
@@ -2616,6 +2703,7 @@ pub fn run() {
             search_apps,
             get_category,
             get_app_detail,
+            get_app_permissions,
             list_installed_apps,
             refresh_provider_caches,
             list_flatpak_remotes,
@@ -2644,6 +2732,35 @@ mod tests {
         assert_eq!(apps[1].summary, "Editor for notes");
         assert_eq!(apps[1].version, "2.4");
     }
+
+    #[test]
+    fn release_items_skip_empty_versions_and_parse_dates() {
+        let releases = vec![
+            ApiRelease {
+                version: Some("1.2".to_string()),
+                timestamp: Some(Value::String("1700000000".to_string())),
+            },
+            ApiRelease {
+                version: Some("   ".to_string()),
+                timestamp: None,
+            },
+            ApiRelease {
+                version: None,
+                timestamp: None,
+            },
+            ApiRelease {
+                version: Some("1.0".to_string()),
+                timestamp: Some(Value::from(1600000000)),
+            },
+        ];
+        let items = release_items(&releases);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].version, "1.2");
+        assert_eq!(items[0].date, Some(1_700_000_000));
+        assert_eq!(items[1].version, "1.0");
+        assert_eq!(items[1].date, Some(1_600_000_000));
+    }
+
     #[test]
     fn flatpak_ids_reject_options_and_paths() {
         for id in [
