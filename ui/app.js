@@ -26,7 +26,15 @@ const ACTIONS = {
   update: { busy: "Güncelleniyor…", verb: "güncelleniyor", done: "Güncelleme tamamlandı." },
   remove: { busy: "Kaldırılıyor…", verb: "kaldırılıyor", done: "Kaldırma tamamlandı." },
 };
-const ACTION_LABELS = { install: "Kurulum", update: "Güncelleme", remove: "Kaldırma", prune: "Bakım", channel: "Kanal" };
+const ACTION_LABELS = {
+  install: "Kurulum",
+  update: "Güncelleme",
+  remove: "Kaldırma",
+  prune: "Bakım",
+  channel: "Kanal",
+  mask: "Güncelleme durdurma",
+  unmask: "Güncelleme sürdürme",
+};
 const PROVIDER_NAMES = { flatpak: "Flatpak", snap: "Snap", brew: "Homebrew" };
 const PROVIDER_FILTERS = [
   { value: "all", label: "Tümü" },
@@ -2559,6 +2567,13 @@ function detailActionButtons(app) {
   return actionButtonsHtml(app, { large: true, allowRemove: true });
 }
 
+function maskButtonHtml(app, provider) {
+  if (provider !== "flatpak" || !app.installed) return "";
+  const pinned = Boolean(app.pinned);
+  const label = pinned ? "Güncellemeleri sürdür" : "Güncellemeleri durdur";
+  return `<button class="btn btn-ghost btn-sm" type="button" data-mask="${pinned ? "off" : "on"}" data-id="${attr(app.id)}" title="${attr(label)}" aria-label="${attr(`${app.name || app.id} · ${label}`)}">${pinned ? "Güncellemeleri sürdür" : "Güncellemeleri durdur"}</button>`;
+}
+
 function infoCardHtml(detail) {
   const app = detail.app;
   const rows = [];
@@ -2860,6 +2875,7 @@ function renderDetail() {
         <div class="detail-actions">
           ${detailActionButtons(app)}
           ${favoriteButtonHtml(app, { large: true })}
+          ${maskButtonHtml(app, provider)}
           ${command ? `<button class="btn btn-ghost btn-sm" type="button" data-copy-command="${attr(command)}" title="${attr(command)}" aria-label="CLI kurulum komutunu kopyala">${ICON.copy}Komutu kopyala</button>` : ""}
           <button class="btn btn-ghost btn-sm" type="button" data-cli data-id="${attr(app.id)}" data-provider="${attr(provider)}">CLI komutları</button>
           <span class="detail-size">${detail.downloadSize ? `İndirme: ${formatBytes(detail.downloadSize)} · ` : ""}${escapeHtml(providerInstallInfo(app))}</span>
@@ -3186,6 +3202,31 @@ function applyAction(action, provider, id) {
     }
   }
   updateInstalledCount();
+}
+
+async function setAppMask(id, masked) {
+  if (state.busy) return;
+  state.busy = { id, provider: "flatpak", action: masked ? "mask" : "unmask", name: id };
+  showActivity(`${id} · ${masked ? "güncellemeler durduruluyor" : "güncellemeler sürdürülüyor"}…`);
+  try {
+    const outcome = await invoke("set_app_mask", { id, masked });
+    if (!outcome?.success) throw new Error(outcome?.message || "İşlem tamamlanamadı.");
+    recordActivity({
+      action: masked ? "mask" : "unmask",
+      app: { id, provider: "flatpak", name: id },
+      ok: true,
+      message: outcome.message || "",
+    });
+    toast(outcome.message || "İşlem tamamlandı.", "success");
+    if (state.installedLoaded) await loadInstalled(true, true);
+    if (state.detail?.app?.id === id) await loadDetail(id, "flatpak", true);
+  } catch (err) {
+    toast(errText(err), "error");
+  } finally {
+    state.busy = null;
+    hideActivity();
+    renderRoute();
+  }
 }
 
 async function switchSnapChannel(id, channel) {
@@ -3907,6 +3948,22 @@ function bindEvents() {
       if (!app) return;
       if (action === "remove") askRemove(app);
       else performAction(action, app);
+      return;
+    }
+
+    const maskButton = target.closest("[data-mask]");
+    if (maskButton) {
+      const id = maskButton.dataset.id;
+      const masked = maskButton.dataset.mask === "on";
+      if (!id) return;
+      askConfirm({
+        title: masked ? "Güncellemeleri durdur" : "Güncellemeleri sürdür",
+        text: masked
+          ? `${id} için otomatik güncellemeler durdurulacak. Uygulama kullanılmaya devam eder.`
+          : `${id} için güncellemeler yeniden etkinleştirilecek.`,
+        label: masked ? "Durdur" : "Sürdür",
+        onConfirm: () => setAppMask(id, masked),
+      });
       return;
     }
 
@@ -4922,6 +4979,20 @@ async function mockInvoke(command, args = {}) {
     return {
       totalBytes: apps.length * 120 * 1024 * 1024,
       apps: apps.length,
+    };
+  }
+
+  if (command === "set_app_mask") {
+    await sleep(300);
+    return {
+      success: true,
+      code: null,
+      message: args.masked
+        ? `${args.id} için güncellemeler durduruldu.`
+        : `${args.id} için güncellemeler yeniden etkinleştirildi.`,
+      appId: args.id,
+      action: args.masked ? "mask" : "unmask",
+      manager: "Flatpak",
     };
   }
 

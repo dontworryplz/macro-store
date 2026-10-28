@@ -104,6 +104,7 @@ static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 struct FlatpakSnapshot {
     installed: HashSet<String>,
     updates: HashSet<String>,
+    masked: HashSet<String>,
     apps: Vec<FlatpakInstalled>,
 }
 
@@ -989,19 +990,38 @@ fn read_flatpak_user_updates() -> HashSet<String> {
     .unwrap_or_default()
 }
 
+fn read_flatpak_user_masks() -> HashSet<String> {
+    run_capture("flatpak", &["mask", "--user"])
+        .ok()
+        .filter(|output| output.success)
+        .map(|output| {
+            output
+                .stdout
+                .lines()
+                .map(str::trim)
+                .filter(|id| valid_flatpak_id(id))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn read_flatpak_snapshot() -> FlatpakSnapshot {
-    let (apps, updates) = std::thread::scope(|scope| {
+    let (apps, updates, masked) = std::thread::scope(|scope| {
         let apps = scope.spawn(read_flatpak_user_list);
         let updates = scope.spawn(read_flatpak_user_updates);
+        let masked = scope.spawn(read_flatpak_user_masks);
         (
             apps.join().unwrap_or_default(),
             updates.join().unwrap_or_default(),
+            masked.join().unwrap_or_default(),
         )
     });
     let installed = apps.iter().map(|app| app.app_id.clone()).collect();
     FlatpakSnapshot {
         installed,
         updates,
+        masked,
         apps,
     }
 }
@@ -1117,7 +1137,7 @@ fn installed_apps(snapshot: &FlatpakSnapshot) -> Vec<AppItem> {
                     .or_else(|| Some(flatpak_icon_url(&installed.app_id))),
                 installed: true,
                 update_available,
-                pinned: false,
+                pinned: snapshot.masked.contains(&installed.app_id),
                 channel: None,
                 category: None,
                 monthly_installs: None,
@@ -2191,7 +2211,7 @@ async fn get_flatpak_app_detail(app_id: String) -> Result<AppDetail, String> {
         icon: safe_icon(appstream.icon.clone(), &app_id),
         installed: is_installed,
         update_available: is_installed && snapshot.updates.contains(&app_id),
-        pinned: false,
+        pinned: is_installed && snapshot.masked.contains(&app_id),
         channel: None,
         category: main_category_from_appstream(&appstream.categories),
         monthly_installs,
@@ -2399,6 +2419,67 @@ async fn prune_unused_runtimes(app: AppHandle) -> Result<OperationOutcome, Strin
         message,
         app_id: String::new(),
         action: "prune".to_string(),
+        manager: "Flatpak".to_string(),
+    };
+    let _ = app.emit("app-finished", outcome.clone());
+    Ok(outcome)
+}
+
+#[tauri::command]
+async fn set_app_mask(
+    app: AppHandle,
+    id: String,
+    masked: bool,
+) -> Result<OperationOutcome, String> {
+    if !valid_flatpak_id(&id) {
+        return Err("Uygulama kimliği geçersiz.".to_string());
+    }
+    if OPERATING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("Zaten devam eden bir işlem var.".to_string());
+    }
+    let _lock = OperationLock;
+    let masked_id = id.clone();
+    let output = tokio::task::spawn_blocking(move || {
+        let args: Vec<&str> = if masked {
+            vec!["mask", "--user", &masked_id]
+        } else {
+            vec!["mask", "--user", "--remove", &masked_id]
+        };
+        run_capture("flatpak", &args)
+    })
+    .await
+    .map_err(|error| format!("Maskeleme arka planda tamamlanamadı: {error}"))??;
+
+    let message = if output.success {
+        if masked {
+            format!("{id} için güncellemeler durduruldu.")
+        } else {
+            format!("{id} için güncellemeler yeniden etkinleştirildi.")
+        }
+    } else {
+        failure_message("flatpak mask", &output)
+    };
+    emit_log(
+        &app,
+        if output.success {
+            format!("✓ {message}")
+        } else {
+            format!("✕ {message}")
+        },
+        if output.success { "info" } else { "error" },
+    );
+    if output.success {
+        invalidate_flatpak_cache();
+    }
+    let outcome = OperationOutcome {
+        success: output.success,
+        code: None,
+        message,
+        app_id: id,
+        action: if masked { "mask" } else { "unmask" }.to_string(),
         manager: "Flatpak".to_string(),
     };
     let _ = app.emit("app-finished", outcome.clone());
@@ -2991,6 +3072,7 @@ pub fn run() {
             library_usage,
             prune_unused_runtimes,
             switch_snap_channel,
+            set_app_mask,
             list_brew_taps,
             add_brew_tap,
             remove_brew_tap,
