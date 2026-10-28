@@ -947,6 +947,12 @@ input:focus-visible,
 
 .btn:disabled { opacity: 0.55; }
 
+.btn svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+}
+
 .btn-primary {
   background: var(--text);
   border-color: var(--text);

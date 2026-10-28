@@ -23,6 +23,12 @@ kurmak için çağrılır.
 - Yüklü uygulamalar listesi ve sağlayıcı/güncelleme filtreleri
 - Yüklü uygulamalar listesi 40'arlı parçalar halinde açılır; sağlayıcı hataları
   başarılı kaynakların sonuçlarını gizlemez.
+- Bekleyen güncellemeler tek tıkla sırayla uygulanır; ilerleme ve başarısız
+  paketler ayrı ayrı bildirilir.
+- Sağlayıcı filtrelerinde sonuç sayacı; yüklü uygulamalar ad, güncelleme ve
+  sağlayıcıya göre sıralanabilir.
+- Uygulama ayrıntılarında Flatpak, Snap ve Homebrew için kurulum komutu
+  kopyalanabilir.
 - Snap izleme kanalı ve Homebrew sabitlenmiş formula durumu uygulama
   ayrıntılarında gösterilir.
 - **Yenile** sağlayıcı önbelleklerini temizler; normal listeleme 15 saniyelik
