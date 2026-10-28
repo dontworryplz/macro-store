@@ -1236,32 +1236,59 @@ async fn get_json<T: DeserializeOwned>(url: &str) -> Result<T, String> {
         .map_err(|err| format!("Flathub verisi okunamadı: {err}"))
 }
 
+fn cache_read<T: Clone>(
+    cache: &Mutex<HashMap<String, (Instant, T)>>,
+    key: &str,
+    ttl: Duration,
+) -> Option<T> {
+    let guard = cache.lock().ok()?;
+    let (checked_at, value) = guard.get(key)?;
+    if checked_at.elapsed() < ttl {
+        Some(value.clone())
+    } else {
+        None
+    }
+}
+
+fn cache_write<T>(
+    cache: &Mutex<HashMap<String, (Instant, T)>>,
+    key: &str,
+    value: T,
+    ttl: Duration,
+    limit: usize,
+) {
+    let Ok(mut guard) = cache.lock() else {
+        return;
+    };
+    guard.retain(|_, (checked_at, _)| checked_at.elapsed() < ttl);
+    if guard.len() >= limit {
+        if let Some(oldest) = guard
+            .iter()
+            .min_by_key(|(_, (checked_at, _))| checked_at.elapsed())
+            .map(|(key, _)| key.clone())
+        {
+            guard.remove(&oldest);
+        }
+    }
+    guard.insert(key.to_string(), (Instant::now(), value));
+}
+
 async fn get_appstream_cached(app_id: &str) -> Result<Appstream, String> {
     let cache = APPSTREAM_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(guard) = cache.lock() {
-        if let Some((checked_at, appstream)) = guard.get(app_id) {
-            if checked_at.elapsed() < APPSTREAM_CACHE_TTL {
-                return Ok(appstream.clone());
-            }
-        }
+    if let Some(appstream) = cache_read(cache, app_id, APPSTREAM_CACHE_TTL) {
+        return Ok(appstream);
     }
 
     let url = format!("{FLATHUB_API}/appstream/{app_id}");
     let appstream = get_json::<Appstream>(&url).await?;
 
-    if let Ok(mut guard) = cache.lock() {
-        guard.retain(|_, (checked_at, _)| checked_at.elapsed() < APPSTREAM_CACHE_TTL);
-        if guard.len() >= APPSTREAM_CACHE_LIMIT {
-            if let Some(oldest) = guard
-                .iter()
-                .min_by_key(|(_, (checked_at, _))| checked_at.elapsed())
-                .map(|(key, _)| key.clone())
-            {
-                guard.remove(&oldest);
-            }
-        }
-        guard.insert(app_id.to_string(), (Instant::now(), appstream.clone()));
-    }
+    cache_write(
+        cache,
+        app_id,
+        appstream.clone(),
+        APPSTREAM_CACHE_TTL,
+        APPSTREAM_CACHE_LIMIT,
+    );
 
     Ok(appstream)
 }
@@ -1277,31 +1304,21 @@ fn invalidate_appstream_cache() {
 
 async fn get_cached_json<T: DeserializeOwned>(url: &str) -> Result<T, String> {
     let cache = JSON_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(guard) = cache.lock() {
-        if let Some((checked_at, value)) = guard.get(url) {
-            if checked_at.elapsed() < JSON_CACHE_TTL {
-                if let Ok(parsed) = serde_json::from_value(value.clone()) {
-                    return Ok(parsed);
-                }
-            }
+    if let Some(value) = cache_read(cache, url, JSON_CACHE_TTL) {
+        if let Ok(parsed) = serde_json::from_value(value) {
+            return Ok(parsed);
         }
     }
 
     let value = get_json::<Value>(url).await?;
 
-    if let Ok(mut guard) = cache.lock() {
-        guard.retain(|_, (checked_at, _)| checked_at.elapsed() < JSON_CACHE_TTL);
-        if guard.len() >= JSON_CACHE_LIMIT {
-            if let Some(oldest) = guard
-                .iter()
-                .min_by_key(|(_, (checked_at, _))| checked_at.elapsed())
-                .map(|(key, _)| key.clone())
-            {
-                guard.remove(&oldest);
-            }
-        }
-        guard.insert(url.to_string(), (Instant::now(), value.clone()));
-    }
+    cache_write(
+        cache,
+        url,
+        value.clone(),
+        JSON_CACHE_TTL,
+        JSON_CACHE_LIMIT,
+    );
 
     serde_json::from_value(value).map_err(|err| format!("Flathub verisi çözümlenemedi: {err}"))
 }
@@ -2395,6 +2412,44 @@ async fn prune_unused_runtimes(app: AppHandle) -> Result<OperationOutcome, Strin
 }
 
 #[tauri::command]
+async fn switch_snap_channel(
+    app: AppHandle,
+    id: String,
+    channel: String,
+) -> Result<OperationOutcome, String> {
+    if SETTING_UP.load(Ordering::SeqCst) {
+        return Err(
+            "Sistem hazırlığı sürüyor. Lütfen tamamlandıktan sonra yeniden deneyin.".to_string(),
+        );
+    }
+    if OPERATING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("Zaten devam eden bir işlem var.".to_string());
+    }
+    let _lock = OperationLock;
+    let message = match snap::switch_channel(&id, &channel).await {
+        Ok(message) => message,
+        Err(error) => {
+            emit_log(&app, format!("✕ {error}"), "error");
+            return Err(error);
+        }
+    };
+    emit_log(&app, format!("✓ {message}"), "info");
+    let outcome = OperationOutcome {
+        success: true,
+        code: None,
+        message,
+        app_id: id,
+        action: "channel".to_string(),
+        manager: "Snap".to_string(),
+    };
+    let _ = app.emit("app-finished", outcome.clone());
+    Ok(outcome)
+}
+
+#[tauri::command]
 fn refresh_provider_caches() {
     invalidate_flatpak_cache();
     invalidate_appstream_cache();
@@ -2920,6 +2975,7 @@ pub fn run() {
             list_installed_apps,
             library_usage,
             prune_unused_runtimes,
+            switch_snap_channel,
             refresh_provider_caches,
             list_flatpak_remotes,
             add_flatpak_remote,
@@ -2946,6 +3002,25 @@ mod tests {
         assert_eq!(apps[0].version, "1.0");
         assert_eq!(apps[1].summary, "Editor for notes");
         assert_eq!(apps[1].version, "2.4");
+    }
+
+    #[test]
+    fn cache_invalidation_clears_entries() {
+        let json = JSON_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        json.lock().expect("json cache lock").insert(
+            "https://example.test".to_string(),
+            (Instant::now(), Value::Null),
+        );
+        invalidate_json_cache();
+        assert!(json.lock().expect("json cache lock").is_empty());
+
+        let icons = ICON_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        icons.lock().expect("icon cache lock").insert(
+            "org.example.Alpha".to_string(),
+            Some("data:image/png;base64,".to_string()),
+        );
+        invalidate_icon_cache();
+        assert!(icons.lock().expect("icon cache lock").is_empty());
     }
 
     #[test]

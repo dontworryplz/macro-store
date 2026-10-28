@@ -13,6 +13,7 @@ const LAST_REFRESH_KEY = "macro-last-refresh";
 const FAVORITES_KEY = "macro-favorites";
 const RECENTS_KEY = "macro-recents";
 const RECENTS_LIMIT = 5;
+const UPDATE_WATCH_INTERVAL = 30 * 60 * 1000;
 const ACTIVITY_KEY = "macro-activity";
 const ACTIVITY_LIMIT = 25;
 const LIBRARY_PREFS_KEY = "macro-library-prefs";
@@ -25,7 +26,7 @@ const ACTIONS = {
   update: { busy: "Güncelleniyor…", verb: "güncelleniyor", done: "Güncelleme tamamlandı." },
   remove: { busy: "Kaldırılıyor…", verb: "kaldırılıyor", done: "Kaldırma tamamlandı." },
 };
-const ACTION_LABELS = { install: "Kurulum", update: "Güncelleme", remove: "Kaldırma", prune: "Bakım" };
+const ACTION_LABELS = { install: "Kurulum", update: "Güncelleme", remove: "Kaldırma", prune: "Bakım", channel: "Kanal" };
 const PROVIDER_NAMES = { flatpak: "Flatpak", snap: "Snap", brew: "Homebrew" };
 const PROVIDER_FILTERS = [
   { value: "all", label: "Tümü" },
@@ -541,6 +542,7 @@ const els = {
 
 let searchTimer = null;
 let installedSearchTimer = null;
+let updateTimer = null;
 let activityTimer = null;
 let toastTimer = null;
 let toastSeq = 0;
@@ -1626,6 +1628,25 @@ async function loadInstalled(force = false, silent = false) {
       renderIf("installed", renderInstalled);
     }
   }
+}
+
+function startUpdateWatch() {
+  if (updateTimer) return;
+  updateTimer = setInterval(() => {
+    if (document.hidden) return;
+    checkForUpdates();
+  }, UPDATE_WATCH_INTERVAL);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) checkForUpdates();
+  });
+}
+
+async function checkForUpdates() {
+  if (state.installedLoading || state.batch || state.busy) return;
+  const before = state.installed.filter(app => app.updateAvailable).length;
+  await loadInstalled(true, true);
+  const after = state.installed.filter(app => app.updateAvailable).length;
+  if (after > before) toast(`${after - before} yeni güncelleme hazır.`, "info");
 }
 
 function cancelPendingSearch() {
@@ -2851,6 +2872,7 @@ function renderDetail() {
           ${description ? `<div class="prose">${description}</div>` : '<p class="prose">Açıklama sağlanmamış.</p>'}
         </section>
         ${isFlatpak && app.installed ? permissionsHtml() : ""}
+        ${snapChannelHtml(app)}
         ${releasesHtml(detail.releases)}
         ${communityContent}
       </div>
@@ -2861,6 +2883,23 @@ function renderDetail() {
     </div>
 
     <p class="detail-footnote">${providerNote}</p>`;
+}
+
+const SNAP_CHANNELS = ["latest/stable", "latest/candidate", "latest/beta", "latest/edge"];
+
+function snapChannelHtml(app) {
+  if (appProvider(app) !== "snap" || !app.installed) return "";
+  const current = app.channel || "";
+  return `<section class="detail-section">
+    <h2>Snap kanalı <span class="source-note">${escapeHtml(current || "bilinmiyor")}</span></h2>
+    <div class="channel-row">
+      ${SNAP_CHANNELS.map(channel => `
+        <button class="chip" type="button" data-snap-channel="${attr(channel)}" data-id="${attr(app.id)}" aria-pressed="${channel === current}">
+          ${escapeHtml(channel.replace("latest/", ""))}
+        </button>`).join("")}
+    </div>
+    <p class="source-note">Kanal değişikliği Snap paketini yeni sürüm akışına geçirir ve paketi yeniler.</p>
+  </section>`;
 }
 
 function renderSettings() {
@@ -3074,6 +3113,27 @@ function applyAction(action, provider, id) {
     }
   }
   updateInstalledCount();
+}
+
+async function switchSnapChannel(id, channel) {
+  if (state.busy) return;
+  state.busy = { id, provider: "snap", action: "channel", name: id };
+  showActivity(`${id} · ${channel} kanalına geçiriliyor…`);
+  try {
+    const outcome = await invoke("switch_snap_channel", { id, channel });
+    if (!outcome?.success) throw new Error(outcome?.message || "Kanal değiştirilemedi.");
+    recordActivity({ action: "channel", app: { id, provider: "snap", name: id }, ok: true, message: outcome.message || "" });
+    toast(outcome.message || "Kanal değiştirildi.", "success");
+    if (state.detail?.app?.id === id) await loadDetail(id, "snap", true);
+    if (state.installedLoaded) await loadInstalled(true, true);
+  } catch (err) {
+    recordActivity({ action: "channel", app: { id, provider: "snap", name: id }, ok: false, message: errText(err) });
+    toast(errText(err), "error");
+  } finally {
+    state.busy = null;
+    hideActivity();
+    renderRoute();
+  }
 }
 
 async function runPruneRuntimes() {
@@ -3766,6 +3826,20 @@ function bindEvents() {
       return;
     }
 
+    const channelButton = target.closest("[data-snap-channel]");
+    if (channelButton) {
+      const channel = channelButton.dataset.snapChannel;
+      const id = channelButton.dataset.id;
+      if (!channel || !id) return;
+      askConfirm({
+        title: "Snap kanalını değiştir",
+        text: `${id} paketi “${channel}” kanalına geçirilecek ve yenilenecek.`,
+        label: "Değiştir",
+        onConfirm: () => switchSnapChannel(id, channel),
+      });
+      return;
+    }
+
     const pruneButton = target.closest("[data-prune-runtimes]");
     if (pruneButton && !pruneButton.disabled) {
       askConfirm({
@@ -4053,6 +4127,7 @@ async function init() {
   loadActivityHistory();
   loadLibraryPrefs();
   bindEvents();
+  startUpdateWatch();
   setTheme(currentTheme());
 
   try {
@@ -4747,6 +4822,18 @@ async function mockInvoke(command, args = {}) {
     return {
       totalBytes: apps.length * 120 * 1024 * 1024,
       apps: apps.length,
+    };
+  }
+
+  if (command === "switch_snap_channel") {
+    await sleep(400);
+    return {
+      success: true,
+      code: null,
+      message: `Snap ${args.id} ${args.channel} kanalına geçirildi.`,
+      appId: args.id,
+      action: "channel",
+      manager: "Snap",
     };
   }
 

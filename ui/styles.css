@@ -1631,6 +1631,13 @@ html[data-theme="light"] .cat-icon circle { fill: rgba(139, 106, 53, 0.08); }
   line-height: 1.5;
 }
 
+.channel-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
 .settings-actions {
   display: flex;
   flex-wrap: wrap;
