@@ -82,10 +82,14 @@ const CATEGORIES: [&str; 11] = [
 
 const FLATPAK_CACHE_TTL: Duration = Duration::from_secs(15);
 const FLATPAK_VERSION_TTL: Duration = Duration::from_secs(30);
+const APPSTREAM_CACHE_TTL: Duration = Duration::from_secs(300);
+const APPSTREAM_CACHE_LIMIT: usize = 96;
 type FlatpakStateCache = Mutex<Option<(Instant, Arc<FlatpakSnapshot>)>>;
 type FlatpakVersionCache = Mutex<Option<(Instant, Option<String>)>>;
+type AppstreamCache = Mutex<HashMap<String, (Instant, Appstream)>>;
 static FLATPAK_STATE_CACHE: OnceLock<FlatpakStateCache> = OnceLock::new();
 static FLATPAK_VERSION_CACHE: OnceLock<FlatpakVersionCache> = OnceLock::new();
+static APPSTREAM_CACHE: OnceLock<AppstreamCache> = OnceLock::new();
 static OPERATING: AtomicBool = AtomicBool::new(false);
 static SETTING_UP: AtomicBool = AtomicBool::new(false);
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -414,7 +418,7 @@ struct ApiAppOfDay {
     app_id: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct ApiScreenshotSize {
     #[serde(default)]
     width: String,
@@ -422,7 +426,7 @@ struct ApiScreenshotSize {
     src: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct ApiScreenshot {
     #[serde(default)]
     sizes: Vec<ApiScreenshotSize>,
@@ -430,7 +434,7 @@ struct ApiScreenshot {
     caption: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct ApiRelease {
     #[serde(default)]
     version: Option<String>,
@@ -438,13 +442,13 @@ struct ApiRelease {
     timestamp: Option<Value>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 struct ApiUrls {
     #[serde(default)]
     homepage: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct Appstream {
     #[serde(default)]
     id: String,
@@ -1183,6 +1187,45 @@ async fn get_optional<T: DeserializeOwned>(url: &str) -> Option<T> {
         .ok()
 }
 
+async fn get_appstream_cached(app_id: &str) -> Result<Appstream, String> {
+    let cache = APPSTREAM_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(guard) = cache.lock() {
+        if let Some((checked_at, appstream)) = guard.get(app_id) {
+            if checked_at.elapsed() < APPSTREAM_CACHE_TTL {
+                return Ok(appstream.clone());
+            }
+        }
+    }
+
+    let url = format!("{FLATHUB_API}/appstream/{app_id}");
+    let appstream = get_json::<Appstream>(&url).await?;
+
+    if let Ok(mut guard) = cache.lock() {
+        guard.retain(|_, (checked_at, _)| checked_at.elapsed() < APPSTREAM_CACHE_TTL);
+        if guard.len() >= APPSTREAM_CACHE_LIMIT {
+            if let Some(oldest) = guard
+                .iter()
+                .min_by_key(|(_, (checked_at, _))| checked_at.elapsed())
+                .map(|(key, _)| key.clone())
+            {
+                guard.remove(&oldest);
+            }
+        }
+        guard.insert(app_id.to_string(), (Instant::now(), appstream.clone()));
+    }
+
+    Ok(appstream)
+}
+
+fn invalidate_appstream_cache() {
+    if let Ok(mut cache) = APPSTREAM_CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+    {
+        cache.clear();
+    }
+}
+
 fn safe_icon(value: Option<String>, app_id: &str) -> Option<String> {
     value
         .filter(|url| url.starts_with("https://dl.flathub.org/"))
@@ -1380,8 +1423,7 @@ async fn fetch_appstream_item(
     installed: &HashSet<String>,
     updates: &HashSet<String>,
 ) -> AppItem {
-    let url = format!("{FLATHUB_API}/appstream/{id}");
-    match get_json::<Appstream>(&url).await {
+    match get_appstream_cached(&id).await {
         Ok(appstream) => {
             let version = appstream
                 .releases
@@ -1992,14 +2034,13 @@ async fn get_flatpak_app_detail(app_id: String) -> Result<AppDetail, String> {
     }
     let snapshot = flatpak_snapshot_async().await?;
     let encoded = app_id.clone();
-    let appstream_url = format!("{FLATHUB_API}/appstream/{encoded}");
     let summary_url = format!("{FLATHUB_API}/summary/{encoded}");
     let stats_url = format!("{FLATHUB_API}/stats/{encoded}");
     let ratings_url = format!("{ODRS_API}/ratings/{encoded}");
     let reviews_url = format!("{ODRS_API}/app/{encoded}");
 
     let (appstream, summary, stats, ratings, reviews) = tokio::join!(
-        get_json::<Appstream>(&appstream_url),
+        get_appstream_cached(&app_id),
         get_optional::<ApiSummary>(&summary_url),
         get_optional::<ApiStats>(&stats_url),
         get_optional::<OdrRatings>(&ratings_url),
@@ -2187,6 +2228,7 @@ async fn list_installed_apps() -> InstalledAppsResponse {
 #[tauri::command]
 fn refresh_provider_caches() {
     invalidate_flatpak_cache();
+    invalidate_appstream_cache();
     snap::invalidate_cache();
     brew::invalidate_cache();
 }
