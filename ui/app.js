@@ -1462,7 +1462,7 @@ function updateStatus() {
 function updateInstalledCount() {
   const count = state.installed.length;
   const updates = state.installed.filter(app => app.updateAvailable).length;
-  els.installedCount.hidden = !state.installedLoaded || count === 0;
+  els.installedCount.hidden = !state.installedLoaded || count === 0 || updates > 0;
   els.installedCount.textContent = String(count);
   els.updatesCount.hidden = !state.installedLoaded || updates === 0;
   els.updatesCount.textContent = String(updates);
@@ -4652,7 +4652,8 @@ async function mockDiscover(date) {
 }
 
 async function mockSearch(query) {
-  if (String(query || "").trim().length < 2) {
+  const needle = String(query || "").trim().toLocaleLowerCase("tr");
+  if (needle.length < 2) {
     throw new Error("Arama için en az 2 karakter yazın.");
   }
   try {
@@ -5076,7 +5077,7 @@ async function mockInvoke(command, args = {}) {
   }
 
   if (command === "search_apps") {
-    return { apps: mockSearch(args.query), providerErrors: [] };
+    return { apps: await mockSearch(args.query), providerErrors: [] };
   }
 
   if (command === "get_category") {
@@ -5103,13 +5104,13 @@ async function mockInvoke(command, args = {}) {
   if (command === "list_installed_apps") {
     await sleep(180);
     return {
-      apps: MOCK.setup.flatpak ? mockInstalledApps() : [],
+      apps: MOCK.setup.flatpak ? await mockInstalledApps() : [],
       providerErrors: [],
     };
   }
 
   if (command === "library_usage") {
-    const apps = MOCK.setup.flatpak ? mockInstalledApps() : [];
+    const apps = MOCK.setup.flatpak ? await mockInstalledApps() : [];
     return {
       totalBytes: apps.length * 120 * 1024 * 1024,
       apps: apps.length,
