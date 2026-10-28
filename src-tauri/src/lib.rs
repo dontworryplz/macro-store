@@ -84,12 +84,16 @@ const FLATPAK_CACHE_TTL: Duration = Duration::from_secs(15);
 const FLATPAK_VERSION_TTL: Duration = Duration::from_secs(30);
 const APPSTREAM_CACHE_TTL: Duration = Duration::from_secs(300);
 const APPSTREAM_CACHE_LIMIT: usize = 96;
+const JSON_CACHE_TTL: Duration = Duration::from_secs(120);
+const JSON_CACHE_LIMIT: usize = 256;
 type FlatpakStateCache = Mutex<Option<(Instant, Arc<FlatpakSnapshot>)>>;
 type FlatpakVersionCache = Mutex<Option<(Instant, Option<String>)>>;
 type AppstreamCache = Mutex<HashMap<String, (Instant, Appstream)>>;
+type JsonCache = Mutex<HashMap<String, (Instant, Value)>>;
 static FLATPAK_STATE_CACHE: OnceLock<FlatpakStateCache> = OnceLock::new();
 static FLATPAK_VERSION_CACHE: OnceLock<FlatpakVersionCache> = OnceLock::new();
 static APPSTREAM_CACHE: OnceLock<AppstreamCache> = OnceLock::new();
+static JSON_CACHE: OnceLock<JsonCache> = OnceLock::new();
 static OPERATING: AtomicBool = AtomicBool::new(false);
 static SETTING_UP: AtomicBool = AtomicBool::new(false);
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -1180,13 +1184,6 @@ async fn get_json<T: DeserializeOwned>(url: &str) -> Result<T, String> {
         .map_err(|err| format!("Flathub verisi okunamadı: {err}"))
 }
 
-async fn get_optional<T: DeserializeOwned>(url: &str) -> Option<T> {
-    tokio::time::timeout(Duration::from_secs(5), get_json(url))
-        .await
-        .ok()?
-        .ok()
-}
-
 async fn get_appstream_cached(app_id: &str) -> Result<Appstream, String> {
     let cache = APPSTREAM_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Ok(guard) = cache.lock() {
@@ -1222,6 +1219,50 @@ fn invalidate_appstream_cache() {
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
     {
+        cache.clear();
+    }
+}
+
+async fn get_cached_json<T: DeserializeOwned>(url: &str) -> Result<T, String> {
+    let cache = JSON_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(guard) = cache.lock() {
+        if let Some((checked_at, value)) = guard.get(url) {
+            if checked_at.elapsed() < JSON_CACHE_TTL {
+                if let Ok(parsed) = serde_json::from_value(value.clone()) {
+                    return Ok(parsed);
+                }
+            }
+        }
+    }
+
+    let value = get_json::<Value>(url).await?;
+
+    if let Ok(mut guard) = cache.lock() {
+        guard.retain(|_, (checked_at, _)| checked_at.elapsed() < JSON_CACHE_TTL);
+        if guard.len() >= JSON_CACHE_LIMIT {
+            if let Some(oldest) = guard
+                .iter()
+                .min_by_key(|(_, (checked_at, _))| checked_at.elapsed())
+                .map(|(key, _)| key.clone())
+            {
+                guard.remove(&oldest);
+            }
+        }
+        guard.insert(url.to_string(), (Instant::now(), value.clone()));
+    }
+
+    serde_json::from_value(value).map_err(|err| format!("Flathub verisi çözümlenemedi: {err}"))
+}
+
+async fn get_optional_cached<T: DeserializeOwned>(url: &str) -> Option<T> {
+    tokio::time::timeout(Duration::from_secs(5), get_cached_json(url))
+        .await
+        .ok()?
+        .ok()
+}
+
+fn invalidate_json_cache() {
+    if let Ok(mut cache) = JSON_CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock() {
         cache.clear();
     }
 }
@@ -1760,8 +1801,8 @@ async fn get_discover(date: String) -> Result<DiscoverData, String> {
     let day_url = format!("{FLATHUB_API}/app-picks/app-of-the-day/{date}");
     let week_url = format!("{FLATHUB_API}/app-picks/apps-of-the-week/{date}");
     let (day, week) = tokio::join!(
-        get_optional::<ApiAppOfDay>(&day_url),
-        get_optional::<ApiPicks>(&week_url),
+        get_optional_cached::<ApiAppOfDay>(&day_url),
+        get_optional_cached::<ApiPicks>(&week_url),
     );
 
     let day_id = day
@@ -2041,10 +2082,10 @@ async fn get_flatpak_app_detail(app_id: String) -> Result<AppDetail, String> {
 
     let (appstream, summary, stats, ratings, reviews) = tokio::join!(
         get_appstream_cached(&app_id),
-        get_optional::<ApiSummary>(&summary_url),
-        get_optional::<ApiStats>(&stats_url),
-        get_optional::<OdrRatings>(&ratings_url),
-        get_optional::<Vec<OdrReview>>(&reviews_url),
+        get_optional_cached::<ApiSummary>(&summary_url),
+        get_optional_cached::<ApiStats>(&stats_url),
+        get_optional_cached::<OdrRatings>(&ratings_url),
+        get_optional_cached::<Vec<OdrReview>>(&reviews_url),
     );
 
     let appstream = appstream.map_err(|_| {
@@ -2229,6 +2270,7 @@ async fn list_installed_apps() -> InstalledAppsResponse {
 fn refresh_provider_caches() {
     invalidate_flatpak_cache();
     invalidate_appstream_cache();
+    invalidate_json_cache();
     snap::invalidate_cache();
     brew::invalidate_cache();
 }
