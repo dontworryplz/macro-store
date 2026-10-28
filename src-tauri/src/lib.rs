@@ -969,9 +969,15 @@ fn read_flatpak_user_updates() -> HashSet<String> {
 }
 
 fn read_flatpak_snapshot() -> FlatpakSnapshot {
-    let apps = read_flatpak_user_list();
+    let (apps, updates) = std::thread::scope(|scope| {
+        let apps = scope.spawn(read_flatpak_user_list);
+        let updates = scope.spawn(read_flatpak_user_updates);
+        (
+            apps.join().unwrap_or_default(),
+            updates.join().unwrap_or_default(),
+        )
+    });
     let installed = apps.iter().map(|app| app.app_id.clone()).collect();
-    let updates = read_flatpak_user_updates();
     FlatpakSnapshot {
         installed,
         updates,
