@@ -34,6 +34,7 @@ const ACTION_LABELS = {
   channel: "Kanal",
   mask: "Güncelleme durdurma",
   unmask: "Güncelleme sürdürme",
+  rollback: "Sürüm geri alma",
 };
 const PROVIDER_NAMES = { flatpak: "Flatpak", snap: "Snap", brew: "Homebrew" };
 const PROVIDER_FILTERS = [
@@ -481,6 +482,10 @@ const state = {
   permissionsLoading: false,
   permissionsError: "",
   permissionsSeq: 0,
+  commits: [],
+  commitsLoading: false,
+  commitsError: "",
+  commitsSeq: 0,
   remotes: [],
   remotesLoading: false,
   remotesError: "",
@@ -1937,6 +1942,9 @@ async function loadDetail(id, provider = "flatpak", force = false) {
     if (provider === "flatpak" && state.detail?.app?.installed && !state.permissions && !state.permissionsLoading && !state.permissionsError) {
       loadPermissions(id);
     }
+    if (provider === "flatpak" && state.detail?.app?.installed && !state.commits.length && !state.commitsLoading && !state.commitsError) {
+      loadCommits(id);
+    }
     renderIf("detail", renderDetail);
     return;
   }
@@ -1954,11 +1962,16 @@ async function loadDetail(id, provider = "flatpak", force = false) {
     rememberRecent(data.app);
     if (provider === "flatpak" && data?.app?.installed) {
       loadPermissions(id);
+      loadCommits(id);
     } else {
       state.permissionsSeq += 1;
       state.permissions = null;
       state.permissionsLoading = false;
       state.permissionsError = "";
+      state.commitsSeq += 1;
+      state.commits = [];
+      state.commitsLoading = false;
+      state.commitsError = "";
     }
   } catch (err) {
     if (seq !== state.detailSeq) return;
@@ -1966,6 +1979,28 @@ async function loadDetail(id, provider = "flatpak", force = false) {
   } finally {
     if (seq === state.detailSeq) {
       state.detailLoading = false;
+      renderIf("detail", renderDetail);
+    }
+  }
+}
+
+async function loadCommits(appId) {
+  const seq = ++state.commitsSeq;
+  state.commits = [];
+  state.commitsLoading = true;
+  state.commitsError = "";
+  renderIf("detail", renderDetail);
+
+  try {
+    const data = await invoke("flatpak_commits", { appId });
+    if (seq !== state.commitsSeq) return;
+    state.commits = Array.isArray(data) ? data : [];
+  } catch (err) {
+    if (seq !== state.commitsSeq) return;
+    state.commitsError = errText(err);
+  } finally {
+    if (seq === state.commitsSeq) {
+      state.commitsLoading = false;
       renderIf("detail", renderDetail);
     }
   }
@@ -2786,6 +2821,41 @@ function permissionsHtml() {
   </section>`;
 }
 
+function commitsHtml() {
+  if (state.commitsLoading && !state.commits.length) {
+    return `<section class="detail-section"><h2>Sürüm geri alma</h2>${skeletonRows(2)}</section>`;
+  }
+  if (state.commitsError) {
+    return `<section class="detail-section">
+      <h2>Sürüm geri alma</h2>
+      <p class="source-note">${escapeHtml(state.commitsError)}</p>
+    </section>`;
+  }
+  if (!state.commits.length) return "";
+  const rows = state.commits.map((commit, index) => {
+    const label = commit.subject || `Kayıt ${commit.commit.slice(0, 7)}`;
+    const dateText = commit.date ? formatDate(commit.date) : "";
+    return `
+      <li class="commit-row">
+        <div class="commit-body">
+          <strong>${escapeHtml(label)}</strong>
+          <span class="commit-meta">
+            ${index === 0 ? '<span class="tag tag-update">Yüklü</span>' : ""}
+            ${commit.version ? `<span>${escapeHtml(commit.version)}</span>` : ""}
+            ${dateText ? `<span>${escapeHtml(dateText)}</span>` : ""}
+            <code class="commit-hash">${escapeHtml(commit.commit.slice(0, 7))}</code>
+          </span>
+        </div>
+        ${index === 0 ? "" : `<button class="btn btn-ghost btn-sm" type="button" data-rollback="${attr(commit.commit)}" data-id="${attr(state.detail?.app?.id || "")}" data-label="${attr(label)}">Bu sürüme dön</button>`}
+      </li>`;
+  }).join("");
+  return `<section class="detail-section">
+    <h2>Sürüm geri alma <span class="source-note">${state.commits.length} kayıt</span></h2>
+    <ol class="commit-list">${rows}</ol>
+    <p class="source-note">Geri dönmek paketi seçilen sürüme sabitler; sonraki güncellemeler duraklar.</p>
+  </section>`;
+}
+
 function releasesHtml(releases) {
   if (!Array.isArray(releases) || !releases.length) return "";
   return `<section class="detail-section releases-section">
@@ -2901,6 +2971,7 @@ function renderDetail() {
           ${description ? `<div class="prose">${description}</div>` : '<p class="prose">Açıklama sağlanmamış.</p>'}
         </section>
         ${isFlatpak && app.installed ? permissionsHtml() : ""}
+        ${isFlatpak && app.installed ? commitsHtml() : ""}
         ${snapChannelHtml(app)}
         ${releasesHtml(detail.releases)}
         ${communityContent}
@@ -3212,6 +3283,37 @@ function applyAction(action, provider, id) {
     }
   }
   updateInstalledCount();
+}
+
+async function rollbackApp(id, commit, label) {
+  if (state.busy) return;
+  state.busy = { id, provider: "flatpak", action: "rollback", name: id };
+  showActivity(`${id} · “${label}” kaydına dönülüyor…`);
+  try {
+    const outcome = await invoke("rollback_flatpak_app", { id, commit });
+    if (!outcome?.success) throw new Error(outcome?.message || "Sürüm değiştirilemedi.");
+    recordActivity({
+      action: "rollback",
+      app: { id, provider: "flatpak", name: id },
+      ok: true,
+      message: outcome.message || "",
+    });
+    toast(outcome.message || "Sürüm değiştirildi.", "success");
+    if (state.installedLoaded) await loadInstalled(true, true);
+    if (state.detail?.app?.id === id) await loadDetail(id, "flatpak", true);
+  } catch (err) {
+    recordActivity({
+      action: "rollback",
+      app: { id, provider: "flatpak", name: id },
+      ok: false,
+      message: errText(err),
+    });
+    toast(errText(err), "error");
+  } finally {
+    state.busy = null;
+    hideActivity();
+    renderRoute();
+  }
 }
 
 async function setAppMask(id, masked) {
@@ -3958,6 +4060,21 @@ function bindEvents() {
       if (!app) return;
       if (action === "remove") askRemove(app);
       else performAction(action, app);
+      return;
+    }
+
+    const rollbackButton = target.closest("[data-rollback]");
+    if (rollbackButton) {
+      const commit = rollbackButton.dataset.rollback;
+      const id = rollbackButton.dataset.id;
+      const label = rollbackButton.dataset.label || commit?.slice(0, 7);
+      if (!commit || !id) return;
+      askConfirm({
+        title: "Sürüme geri dön",
+        text: `${id} paketi “${label}” kaydına sabitlenecek. Yeni sürümler otomatik gelmez.`,
+        label: "Geri dön",
+        onConfirm: () => rollbackApp(id, commit, label),
+      });
       return;
     }
 
@@ -4996,6 +5113,28 @@ async function mockInvoke(command, args = {}) {
     return {
       totalBytes: apps.length * 120 * 1024 * 1024,
       apps: apps.length,
+    };
+  }
+
+  if (command === "flatpak_commits") {
+    await sleep(160);
+    const now = Math.floor(Date.now() / 1000);
+    return [
+      { commit: "3f8f1a9d2b4c5e6f70819a2b3c4d5e6f70819a2b", subject: "Update to 2.10.0", date: now - 86400 * 3, version: "2.10.0" },
+      { commit: "7c2b9e0f1a3d5b7c9e1f2a4b6c8d0e2f4a6b8c0d", subject: "Fix crash on start", date: now - 86400 * 21, version: "2.8.2" },
+      { commit: "1a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d", subject: "Update to 2.8.0", date: now - 86400 * 48, version: "2.8.0" },
+    ];
+  }
+
+  if (command === "rollback_flatpak_app") {
+    await sleep(420);
+    return {
+      success: true,
+      code: null,
+      message: `${args.id} seçilen sürüme sabitlendi.`,
+      appId: args.id,
+      action: "rollback",
+      manager: "Flatpak",
     };
   }
 
