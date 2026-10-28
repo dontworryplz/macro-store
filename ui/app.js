@@ -1462,6 +1462,13 @@ function updateInstalledCount() {
   els.updatesCount.hidden = !state.installedLoaded || updates === 0;
   els.updatesCount.textContent = String(updates);
   els.updatesCount.title = `${updates} güncelleme bekliyor`;
+  syncTrayBadge(updates);
+}
+
+function syncTrayBadge(updates) {
+  invoke("set_tray_updates", { count: updates }).catch(() => {
+    /* Tepsi simgesi yoksa güncelleme sayacı yalnızca arayüzde kalır. */
+  });
 }
 
 function updateFavoritesCount() {
@@ -4293,6 +4300,9 @@ async function init() {
   try {
     await listen("app-log", event => appendLog(event.payload));
     await listen("setup-log", event => appendSetupLog(event.payload));
+    await listen("tray-check-updates", () => {
+      checkForUpdates();
+    });
     await listen("app-finished", event => {
       if (event.payload && event.payload.success === false && !openModalEl) openLogModal();
     });
@@ -4921,6 +4931,10 @@ async function mockInstallFlatpak() {
 }
 
 async function mockInvoke(command, args = {}) {
+  if (command === "set_tray_updates") {
+    return null;
+  }
+
   if (command === "get_setup_status") {
     await sleep(260);
     return mockSetupStatus();

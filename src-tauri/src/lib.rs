@@ -1,5 +1,6 @@
 mod brew;
 mod snap;
+mod tray;
 
 use base64::Engine as _;
 use futures::future::join_all;
@@ -209,6 +210,15 @@ struct ReviewItem {
 struct ReleaseItem {
     version: String,
     date: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct FlatpakCommit {
+    commit: String,
+    subject: String,
+    date: Option<i64>,
+    version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -945,6 +955,118 @@ fn parse_flatpak_size(value: &str) -> Option<u64> {
         _ => return None,
     };
     Some((amount * factor).round() as u64)
+}
+
+fn valid_commit_hash(value: &str) -> bool {
+    (7..=64).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = year - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+fn parse_flatpak_date(value: &str) -> Option<i64> {
+    let mut parts = value.split_whitespace();
+    let date = parts.next()?;
+    let time = parts.next()?;
+    let zone = parts.next().unwrap_or("+0000");
+
+    let mut date_parts = date.split('-');
+    let year = date_parts.next()?.parse::<i64>().ok()?;
+    let month = date_parts.next()?.parse::<i64>().ok()?;
+    let day = date_parts.next()?.parse::<i64>().ok()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+
+    let mut time_parts = time.split(':');
+    let hour = time_parts.next()?.parse::<i64>().ok()?;
+    let minute = time_parts.next()?.parse::<i64>().ok()?;
+    let second = time_parts.next().unwrap_or("0").parse::<i64>().ok()?;
+    if hour > 23 || minute > 59 || second > 60 {
+        return None;
+    }
+
+    let offset = if zone.starts_with('+') || zone.starts_with('-') {
+        let digits: String = zone[1..].chars().filter(char::is_ascii_digit).collect();
+        if digits.len() < 4 {
+            return None;
+        }
+        let hours = digits[..2].parse::<i64>().ok()?;
+        let minutes = digits[2..4].parse::<i64>().ok()?;
+        let magnitude = hours * 3600 + minutes * 60;
+        if zone.starts_with('-') {
+            -magnitude
+        } else {
+            magnitude
+        }
+    } else {
+        0
+    };
+
+    Some(days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second - offset)
+}
+
+fn parse_remote_info_log(text: &str) -> Vec<FlatpakCommit> {
+    let mut commits: Vec<FlatpakCommit> = Vec::new();
+    let mut current: Option<FlatpakCommit> = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let key = key.trim().to_ascii_lowercase();
+        let value = value.trim();
+        match key.as_str() {
+            "commit" => {
+                if let Some(done) = current.take() {
+                    if valid_commit_hash(&done.commit) {
+                        commits.push(done);
+                    }
+                }
+                if valid_commit_hash(value) {
+                    current = Some(FlatpakCommit {
+                        commit: value.to_string(),
+                        subject: String::new(),
+                        date: None,
+                        version: None,
+                    });
+                }
+            }
+            "subject" => {
+                if let Some(commit) = current.as_mut() {
+                    commit.subject = truncate_chars(value, 200);
+                }
+            }
+            "date" => {
+                if let Some(commit) = current.as_mut() {
+                    commit.date = parse_flatpak_date(value);
+                }
+            }
+            "version" => {
+                if let Some(commit) = current.as_mut() {
+                    commit.version = Some(truncate_chars(value, 64));
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(done) = current.take() {
+        if valid_commit_hash(&done.commit) {
+            commits.push(done);
+        }
+    }
+    commits.truncate(20);
+    commits
 }
 
 fn parse_flatpak_user_list(text: &str) -> Vec<FlatpakInstalled> {
@@ -3089,6 +3211,126 @@ async fn remove_app(
     run_app_action(app, id, provider, ActionKind::Remove).await
 }
 
+fn flatpak_remote_names() -> Vec<String> {
+    run_capture("flatpak", &["remotes", "--user", "--columns=name"])
+        .ok()
+        .filter(|output| output.success)
+        .map(|output| {
+            output
+                .stdout
+                .lines()
+                .map(str::trim)
+                .filter(|name| !name.is_empty() && name.len() <= 64)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn read_flatpak_commits(app_id: &str) -> Result<Vec<FlatpakCommit>, String> {
+    if !flatpak_available() {
+        return Ok(Vec::new());
+    }
+    let mut remotes = flatpak_remote_names();
+    if !remotes.iter().any(|name| name == "flathub") {
+        remotes.insert(0, "flathub".to_string());
+    }
+    for remote in remotes {
+        let Ok(output) = run_capture("flatpak", &["remote-info", "--log", &remote, app_id]) else {
+            continue;
+        };
+        if !output.success {
+            continue;
+        }
+        let commits = parse_remote_info_log(&output.stdout);
+        if !commits.is_empty() {
+            return Ok(commits);
+        }
+    }
+    Ok(Vec::new())
+}
+
+#[tauri::command]
+async fn flatpak_commits(app_id: String) -> Result<Vec<FlatpakCommit>, String> {
+    if !valid_flatpak_id(&app_id) {
+        return Err("Uygulama kimliği geçersiz.".to_string());
+    }
+    tokio::task::spawn_blocking(move || read_flatpak_commits(&app_id))
+        .await
+        .map_err(|error| format!("Sürüm geçmişi arka planda okunamadı: {error}"))?
+}
+
+#[tauri::command]
+async fn rollback_flatpak_app(
+    app: AppHandle,
+    id: String,
+    commit: String,
+) -> Result<OperationOutcome, String> {
+    if !valid_flatpak_id(&id) {
+        return Err("Uygulama kimliği geçersiz.".to_string());
+    }
+    if !valid_commit_hash(&commit) {
+        return Err("Sürüm kimliği geçersiz.".to_string());
+    }
+    if SETTING_UP.load(Ordering::SeqCst) {
+        return Err(
+            "Sistem hazırlığı sürüyor. Lütfen tamamlandıktan sonra yeniden deneyin.".to_string(),
+        );
+    }
+    if OPERATING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("Zaten devam eden bir işlem var.".to_string());
+    }
+    let _lock = OperationLock;
+
+    if !flatpak_snapshot_async().await?.installed.contains(&id) {
+        return Err("Bu Flatpak uygulaması kullanıcı kurulumunda yüklü değil.".to_string());
+    }
+
+    let target = id.clone();
+    let flag = format!("--commit={commit}");
+    let display = format!("flatpak update --user {flag} {target}");
+    emit_log(&app, format!("Komut: {display}"), "cmd");
+    let output = tokio::task::spawn_blocking(move || {
+        run_capture(
+            "flatpak",
+            &["update", "--user", "--noninteractive", &flag, &target],
+        )
+    })
+    .await
+    .map_err(|error| format!("Sürüm geri alma arka planda tamamlanamadı: {error}"))??;
+
+    let message = if output.success {
+        format!("{id} seçilen sürüme sabitlendi.")
+    } else {
+        failure_message("flatpak update", &output)
+    };
+    emit_log(
+        &app,
+        if output.success {
+            format!("✓ {message}")
+        } else {
+            format!("✕ {message}")
+        },
+        if output.success { "info" } else { "error" },
+    );
+    if output.success {
+        invalidate_flatpak_cache();
+    }
+    let outcome = OperationOutcome {
+        success: output.success,
+        code: None,
+        message,
+        app_id: id,
+        action: "rollback".to_string(),
+        manager: "Flatpak".to_string(),
+    };
+    let _ = app.emit("app-finished", outcome.clone());
+    Ok(outcome)
+}
+
 #[tauri::command]
 async fn update_app(
     app: AppHandle,
@@ -3101,6 +3343,10 @@ async fn update_app(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .setup(|app| {
+            tray::setup(app.handle())?;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_setup_status,
             install_flatpak,
@@ -3124,7 +3370,10 @@ pub fn run() {
             remove_flatpak_remote,
             install_app,
             remove_app,
-            update_app
+            update_app,
+            flatpak_commits,
+            rollback_flatpak_app,
+            tray::set_tray_updates
         ])
         .run(tauri::generate_context!())
         .expect("Macro Store başlatılamadı");
@@ -3144,6 +3393,29 @@ mod tests {
         assert_eq!(apps[0].version, "1.0");
         assert_eq!(apps[1].summary, "Editor for notes");
         assert_eq!(apps[1].version, "2.4");
+    }
+
+    #[test]
+    fn remote_info_log_parses_commits() {
+        let log = "commit: 3f8f1a9d2b4c5e6f70819a2b3c4d5e6f70819a2b\nParent: 1111\nSubject: Update to 2.10.0\nDate: 2024-03-05 10:12:33 +0000\n\ncommit: 7c2b9e0f1a3d5b7c9e1f2a4b6c8d0e2f4a6b8c0d\nSubject: Fix crash on start\nDate: 2024-02-01 00:00:00 +0300\n";
+        let commits = parse_remote_info_log(log);
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].subject, "Update to 2.10.0");
+        assert_eq!(commits[0].date, Some(1_709_633_553));
+        assert_eq!(commits[1].date, Some(1_706_734_800));
+        assert!(commits[0].commit.starts_with("3f8f1a9d"));
+    }
+
+    #[test]
+    fn remote_info_log_skips_invalid_commits() {
+        let log = "commit: not-hex\nSubject: nope\n\ncommit: 0123456\nSubject: Short hash ok\n";
+        let commits = parse_remote_info_log(log);
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].commit, "0123456");
+        assert_eq!(commits[0].date, None);
+        assert!(!valid_commit_hash("xyz1234"));
+        assert!(!valid_commit_hash("abc"));
+        assert!(valid_commit_hash("abcdef1"));
     }
 
     #[test]
