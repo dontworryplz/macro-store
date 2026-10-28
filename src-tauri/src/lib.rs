@@ -90,10 +90,12 @@ type FlatpakStateCache = Mutex<Option<(Instant, Arc<FlatpakSnapshot>)>>;
 type FlatpakVersionCache = Mutex<Option<(Instant, Option<String>)>>;
 type AppstreamCache = Mutex<HashMap<String, (Instant, Appstream)>>;
 type JsonCache = Mutex<HashMap<String, (Instant, Value)>>;
+type IconCache = Mutex<HashMap<String, Option<String>>>;
 static FLATPAK_STATE_CACHE: OnceLock<FlatpakStateCache> = OnceLock::new();
 static FLATPAK_VERSION_CACHE: OnceLock<FlatpakVersionCache> = OnceLock::new();
 static APPSTREAM_CACHE: OnceLock<AppstreamCache> = OnceLock::new();
 static JSON_CACHE: OnceLock<JsonCache> = OnceLock::new();
+static ICON_CACHE: OnceLock<IconCache> = OnceLock::new();
 static OPERATING: AtomicBool = AtomicBool::new(false);
 static SETTING_UP: AtomicBool = AtomicBool::new(false);
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -1047,6 +1049,29 @@ fn flatpak_icon_data_url(app_id: &str) -> Option<String> {
     None
 }
 
+fn flatpak_icon_data_url_cached(app_id: &str) -> Option<String> {
+    let cache = ICON_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(guard) = cache.lock() {
+        if let Some(hit) = guard.get(app_id) {
+            return hit.clone();
+        }
+    }
+    let value = flatpak_icon_data_url(app_id);
+    if let Ok(mut guard) = cache.lock() {
+        if guard.len() >= 512 {
+            guard.clear();
+        }
+        guard.insert(app_id.to_string(), value.clone());
+    }
+    value
+}
+
+fn invalidate_icon_cache() {
+    if let Ok(mut cache) = ICON_CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock() {
+        cache.clear();
+    }
+}
+
 fn installed_apps(snapshot: &FlatpakSnapshot) -> Vec<AppItem> {
     snapshot
         .apps
@@ -1061,7 +1086,7 @@ fn installed_apps(snapshot: &FlatpakSnapshot) -> Vec<AppItem> {
                 summary: installed.summary.clone(),
                 developer: String::new(),
                 version: installed.version.clone(),
-                icon: flatpak_icon_data_url(&installed.app_id)
+                icon: flatpak_icon_data_url_cached(&installed.app_id)
                     .or_else(|| Some(flatpak_icon_url(&installed.app_id))),
                 installed: true,
                 update_available,
@@ -2271,6 +2296,7 @@ fn refresh_provider_caches() {
     invalidate_flatpak_cache();
     invalidate_appstream_cache();
     invalidate_json_cache();
+    invalidate_icon_cache();
     snap::invalidate_cache();
     brew::invalidate_cache();
 }
