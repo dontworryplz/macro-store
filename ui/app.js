@@ -3704,6 +3704,21 @@ function mockAppFromAppstream(appstream) {
   };
 }
 
+function mockReleaseItems(appstream) {
+  const releases = Array.isArray(appstream?.releases) ? appstream.releases : [];
+  return releases
+    .filter(release => String(release?.version || "").trim())
+    .slice(0, 8)
+    .map(release => {
+      const raw = release.timestamp;
+      const parsed = typeof raw === "number" ? raw : Number(String(raw || "").trim());
+      return {
+        version: String(release.version).trim(),
+        date: Number.isFinite(parsed) && parsed > 0 ? parsed : null,
+      };
+    });
+}
+
 async function mockAppstream(id) {
   if (MOCK.appCache.has(id)) return MOCK.appCache.get(id);
   const appstream = await mockFetchJson(`${FLATHUB}/appstream/${encodeURIComponent(id)}`);
@@ -3878,6 +3893,7 @@ async function mockDetail(id, provider = "flatpak") {
       installsLastMonth: null,
       rating: null,
       reviews: [],
+      releases: [],
     };
   }
 
@@ -3915,6 +3931,7 @@ async function mockDetail(id, provider = "flatpak") {
       installsLastMonth: null,
       rating: null,
       reviews: [],
+      releases: [],
     };
   }
   const { appstream } = await mockAppstream(id);
@@ -3980,6 +3997,7 @@ async function mockDetail(id, provider = "flatpak") {
     installsLastMonth: stats?.installs_last_month || null,
     rating,
     reviews,
+    releases: mockReleaseItems(appstream),
   };
 }
 
@@ -4187,6 +4205,19 @@ async function mockInvoke(command, args = {}) {
 
   if (command === "get_app_detail") {
     return mockDetail(args.appId || args.app_id, args.provider || "flatpak");
+  }
+
+  if (command === "get_app_permissions") {
+    await sleep(160);
+    const id = args.appId || args.app_id || "";
+    const installed = MOCK.installed.has(id);
+    return {
+      installed,
+      available: true,
+      raw: installed
+        ? `[Context]\nshared=network;ipc;\nsockets=x11;wayland;pulseaudio;\nfilesystems=home;host:ro;\n\n[Session Bus Policy]\norg.freedesktop.portal.Desktop=talk`
+        : "",
+    };
   }
 
   if (command === "list_installed_apps") {
