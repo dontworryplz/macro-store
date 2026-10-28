@@ -24,6 +24,11 @@ const PROVIDER_FILTERS = [
   { value: "brew", label: "Homebrew" },
 ];
 const INSTALLED_PAGE_SIZE = 40;
+const INSTALLED_SORTS = [
+  { value: "name", label: "A-Z" },
+  { value: "updates", label: "Güncelleme önce" },
+  { value: "provider", label: "Sağlayıcıya göre" },
+];
 
 const FALLBACK_ICON = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(
   `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" fill="none">
@@ -40,6 +45,7 @@ const ICON = {
   arrow: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
   trash: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4.5 7h15M9.5 7V5.2c0-.7.5-1.2 1.2-1.2h2.6c.7 0 1.2.5 1.2 1.2V7M6.8 7l.8 12h8.8l.8-12M10 10.5v5M14 10.5v5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
   repo: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><ellipse cx="12" cy="6" rx="7" ry="3" stroke="currentColor" stroke-width="1.6"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6" stroke="currentColor" stroke-width="1.6"/></svg>`,
+  copy: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="8.5" y="8.5" width="11" height="11" rx="2" stroke="currentColor" stroke-width="1.6"/><path d="M15.5 8.5v-2a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2" stroke="currentColor" stroke-width="1.6"/></svg>`,
 };
 
 const CATEGORY_LIST = [
@@ -157,17 +163,56 @@ function providerInstallInfo(app) {
   return "Homebrew paket yöneticisiyle yönetilir";
 }
 
+function cliCommand(app) {
+  const id = String(app?.id || "").trim();
+  if (!id) return "";
+  const provider = appProvider(app);
+  if (provider === "flatpak") return `flatpak install --user flathub ${id}`;
+  if (provider === "snap") return `sudo snap install ${id}`;
+  if (provider === "brew") {
+    const isCask = app.package_type === "cask" || id.startsWith("cask/");
+    const token = id.replace(/^(formula|cask)\//, "");
+    return isCask ? `brew install --cask ${token}` : `brew install ${token}`;
+  }
+  return "";
+}
+
 function sameApp(app, provider, id) {
   return Boolean(app && app.id === id && appProvider(app) === provider);
 }
 
-function providerFilterHtml(scope, selected) {
+function providerCounts(apps) {
+  const counts = { all: 0, flatpak: 0, snap: 0, brew: 0 };
+  if (!Array.isArray(apps)) return null;
+  for (const app of apps) {
+    counts.all += 1;
+    const provider = appProvider(app);
+    if (provider in counts) counts[provider] += 1;
+  }
+  return counts;
+}
+
+function providerFilterHtml(scope, selected, apps = null) {
   const label = scope === "search"
     ? "Arama sonuçlarını sağlayıcıya göre filtrele"
     : "Yüklü uygulamaları sağlayıcıya göre filtrele";
+  const counts = providerCounts(apps);
   return `<div class="provider-filters" role="group" aria-label="${attr(label)}">
-    ${PROVIDER_FILTERS.map(option => `
-      <button class="chip" type="button" data-provider-filter="${scope}" data-provider="${option.value}" aria-pressed="${selected === option.value}">
+    ${PROVIDER_FILTERS.map(option => {
+      const count = counts ? counts[option.value] : null;
+      const optionLabel = count === null ? option.label : `${option.label}, ${count} sonuç`;
+      return `
+      <button class="chip" type="button" data-provider-filter="${scope}" data-provider="${option.value}" aria-pressed="${selected === option.value}" aria-label="${attr(optionLabel)}">
+        ${option.label}${count === null ? "" : `<span>${count}</span>`}
+      </button>`;
+    }).join("")}
+  </div>`;
+}
+
+function sortFilterHtml() {
+  return `<div class="provider-filters sort-filter" role="group" aria-label="Yüklü uygulamaları sırala">
+    ${INSTALLED_SORTS.map(option => `
+      <button class="chip" type="button" data-installed-sort="${option.value}" aria-pressed="${state.installedSort === option.value}">
         ${option.label}
       </button>`).join("")}
   </div>`;
@@ -197,6 +242,7 @@ const state = {
   installedSeq: 0,
   updatesOnly: false,
   installedProvider: "all",
+  installedSort: "name",
   category: null,
   categoryLoading: false,
   categoryError: "",
@@ -220,6 +266,7 @@ const state = {
     logs: [],
   },
   busy: null,
+  batch: null,
   logs: [],
   pendingConfirm: null,
   gallery: null,
@@ -443,6 +490,21 @@ function appMetaHtml(app) {
 }
 function providerMatches(app, selected) {
   return selected === "all" || appProvider(app) === selected;
+}
+
+const PROVIDER_SORT_ORDER = { flatpak: 0, snap: 1, brew: 2 };
+
+function sortInstalledApps(apps, sort) {
+  const byName = (a, b) => String(a.name || a.id || "").localeCompare(String(b.name || b.id || ""), "tr", { sensitivity: "base" });
+  const list = [...apps];
+  if (sort === "updates") {
+    list.sort((a, b) => Number(Boolean(b.updateAvailable)) - Number(Boolean(a.updateAvailable)) || byName(a, b));
+  } else if (sort === "provider") {
+    list.sort((a, b) => (PROVIDER_SORT_ORDER[appProvider(a)] ?? 9) - (PROVIDER_SORT_ORDER[appProvider(b)] ?? 9) || byName(a, b));
+  } else {
+    list.sort(byName);
+  }
+  return list;
 }
 
 function matchesApps(provider, id) {
@@ -1713,7 +1775,7 @@ function renderSearch() {
     ? `<p class="view-note">${escapeHtml(meta)}</p>`
     : `<div class="view-tools">
         <p class="view-note">${escapeHtml(meta)}</p>
-        ${providerFilterHtml("search", state.searchProvider)}
+        ${providerFilterHtml("search", state.searchProvider, state.searchResults)}
       </div>`;
 
   els.searchView.innerHTML = `
@@ -1812,9 +1874,14 @@ function renderInstalled() {
   if (!updates) state.updatesOnly = false;
   const provider = state.installedProvider;
   const providerApps = state.installed.filter(app => providerMatches(app, provider));
-  const visible = state.updatesOnly
-    ? providerApps.filter(app => app.updateAvailable)
-    : providerApps;
+  const visible = sortInstalledApps(
+    state.updatesOnly ? providerApps.filter(app => app.updateAvailable) : providerApps,
+    state.installedSort,
+  );
+  const pending = providerApps.filter(app => app.updateAvailable).length;
+  const countPool = state.updatesOnly
+    ? state.installed.filter(app => app.updateAvailable)
+    : state.installed;
   const providerErrors = state.installedProviderErrors.filter(issue =>
     provider === "all" || issue.provider === provider,
   );
@@ -1878,10 +1945,16 @@ function renderInstalled() {
         <p class="view-sub">${state.installed.length} uygulama${updates ? ` · ${updates} güncelleme` : ""}</p>
       </div>
       ${state.installed.length ? `<div class="view-tools">
+        ${(pending || state.batch) ? `<button class="btn btn-primary btn-sm" type="button" data-update-all${state.busy || state.batch ? " disabled" : ""} aria-label="Bekleyen güncellemeleri sırayla uygula">
+          ${state.batch
+            ? `<span class="spinner"></span>Güncelleniyor ${Math.min(state.batch.done + 1, state.batch.total)}/${state.batch.total}`
+            : `Tümünü güncelle (${pending})`}
+        </button>` : ""}
         ${updates ? `<button class="chip" type="button" data-updates-filter aria-pressed="${state.updatesOnly}">
           Güncellemeler <span>${updates}</span>
         </button>` : ""}
-        ${providerFilterHtml("installed", provider)}
+        ${providerFilterHtml("installed", provider, countPool)}
+        ${sortFilterHtml()}
       </div>` : ""}
     </header>
     ${storeNoticeHtml()}
@@ -2041,6 +2114,7 @@ function renderDetail() {
     : provider === "snap"
       ? "Snap işlemleri sistem kapsamında yönetilir. İşlem sırasında sistem yetkilendirme penceresi açılabilir."
       : "Kurulum, güncelleme ve kaldırma işlemleri Homebrew paket yöneticisiyle yönetilir.";
+  const command = cliCommand(app);
 
   els.detailView.innerHTML = `
     <div class="detail-top">
@@ -2060,6 +2134,7 @@ function renderDetail() {
         ${tags.length ? `<div class="detail-tags">${tags.join("")}</div>` : ""}
         <div class="detail-actions">
           ${detailActionButtons(app)}
+          ${command ? `<button class="btn btn-ghost btn-sm" type="button" data-copy-command="${attr(command)}" title="${attr(command)}" aria-label="CLI kurulum komutunu kopyala">${ICON.copy}Komutu kopyala</button>` : ""}
           <span class="detail-size">${detail.downloadSize ? `İndirme: ${formatBytes(detail.downloadSize)} · ` : ""}${escapeHtml(providerInstallInfo(app))}</span>
         </div>
       </div>
@@ -2280,6 +2355,50 @@ async function performAction(action, app) {
     renderRoute();
     loadInstalled(true, true);
   }
+}
+
+async function runUpdateAll() {
+  if (state.busy || state.batch) return;
+  const provider = state.installedProvider;
+  const targets = state.installed.filter(app => app.updateAvailable && providerMatches(app, provider));
+  if (!targets.length) return;
+
+  const batch = { total: targets.length, done: 0, failed: 0 };
+  state.batch = batch;
+  renderRoute();
+
+  for (const app of targets) {
+    const appProviderName = appProvider(app);
+    state.busy = { id: app.id, provider: appProviderName, action: "update", name: app.name || app.id };
+    showActivity(`${app.name || app.id} · ${providerManagerLabel(app)} güncelleniyor… (${batch.done + batch.failed + 1}/${batch.total})`);
+    renderRoute();
+
+    try {
+      const outcome = await invoke("update_app", { id: app.id, provider: appProviderName });
+      if (outcome && outcome.success === false) {
+        throw new Error(outcome.message || "Güncelleme başarısız oldu.");
+      }
+      applyAction("update", appProviderName, app.id);
+      batch.done += 1;
+    } catch (err) {
+      batch.failed += 1;
+      toast(`${app.name || app.id}: ${errText(err)}`, "error");
+    }
+  }
+
+  state.busy = null;
+  state.batch = null;
+  hideActivity(900);
+
+  if (batch.failed) {
+    toast(`${batch.done} uygulama güncellendi, ${batch.failed} uygulama güncellenemedi.`, batch.done ? "success" : "error");
+    if (!batch.done) openLogModal();
+  } else {
+    toast(`${batch.total} uygulama güncellendi.`, "success");
+  }
+
+  renderRoute();
+  loadInstalled(true, true);
 }
 
 function askRemove(app) {
@@ -2623,6 +2742,21 @@ function bindEvents() {
         state.installedVisibleCount = INSTALLED_PAGE_SIZE;
         renderInstalled();
       }
+      return;
+    }
+
+    const updateAll = target.closest("[data-update-all]");
+    if (updateAll && !updateAll.disabled) {
+      runUpdateAll();
+      return;
+    }
+
+    const sortFilter = target.closest("[data-installed-sort]");
+    if (sortFilter) {
+      const sort = sortFilter.dataset.installedSort;
+      if (!INSTALLED_SORTS.some(option => option.value === sort)) return;
+      state.installedSort = sort;
+      renderInstalled();
       return;
     }
 
