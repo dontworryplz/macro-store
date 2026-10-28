@@ -10,6 +10,9 @@ const SETUP_SEEN_KEY = "macro-setup-seen";
 const SEARCH_HISTORY_KEY = "macro-search-history";
 const SEARCH_HISTORY_LIMIT = 5;
 const LAST_REFRESH_KEY = "macro-last-refresh";
+const FAVORITES_KEY = "macro-favorites";
+const RECENTS_KEY = "macro-recents";
+const RECENTS_LIMIT = 5;
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -49,6 +52,8 @@ const ICON = {
   trash: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4.5 7h15M9.5 7V5.2c0-.7.5-1.2 1.2-1.2h2.6c.7 0 1.2.5 1.2 1.2V7M6.8 7l.8 12h8.8l.8-12M10 10.5v5M14 10.5v5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
   repo: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><ellipse cx="12" cy="6" rx="7" ry="3" stroke="currentColor" stroke-width="1.6"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6" stroke="currentColor" stroke-width="1.6"/></svg>`,
   copy: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="8.5" y="8.5" width="11" height="11" rx="2" stroke="currentColor" stroke-width="1.6"/><path d="M15.5 8.5v-2a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2" stroke="currentColor" stroke-width="1.6"/></svg>`,
+  star: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m12 4.2 2.4 4.9 5.4.8-3.9 3.8.9 5.4-4.8-2.5-4.8 2.5.9-5.4L4.2 9.9l5.4-.8L12 4.2Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>`,
+  starFilled: `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="m12 4.2 2.4 4.9 5.4.8-3.9 3.8.9 5.4-4.8-2.5-4.8 2.5.9-5.4L4.2 9.9l5.4-.8L12 4.2Z"/></svg>`,
 };
 
 const CATEGORY_LIST = [
@@ -248,8 +253,130 @@ function findKnownApp(provider, id) {
     ...(state.discover?.popular || []),
     state.discover?.appOfDay,
     ...(state.category?.apps || []),
+    ...state.favorites,
+    ...state.recents,
   ];
   return pools.find(app => sameApp(app, provider, id)) || null;
+}
+
+function appSnapshot(app) {
+  return {
+    id: app.id,
+    provider: appProvider(app),
+    packageType: app.packageType || null,
+    name: app.name || app.id,
+    summary: app.summary || "",
+    developer: app.developer || "",
+    icon: app.icon || null,
+    category: app.category || null,
+    version: app.version || "",
+    channel: app.channel || null,
+    pinned: Boolean(app.pinned),
+    installed: Boolean(app.installed),
+    updateAvailable: Boolean(app.updateAvailable),
+    monthlyInstalls: app.monthlyInstalls ?? null,
+  };
+}
+
+function readStoredApps(key) {
+  try {
+    const raw = JSON.parse(localStorage.getItem(key) || "[]");
+    if (!Array.isArray(raw)) return [];
+    return raw.filter(item =>
+      item && typeof item.id === "string" && item.id.trim() && PROVIDER_NAMES[item.provider],
+    );
+  } catch {
+    return [];
+  }
+}
+
+function saveStoredApps(key, list) {
+  try {
+    localStorage.setItem(key, JSON.stringify(list));
+  } catch {
+    /* Depolama kapalıysa liste yalnızca oturum boyunca tutulur. */
+  }
+}
+
+function storedAppForView(app) {
+  const live = findKnownApp(appProvider(app), app.id);
+  return live ? { ...app, ...appSnapshot(live) } : app;
+}
+
+function isFavorite(app) {
+  return state.favorites.some(item => sameApp(item, appProvider(app), app.id));
+}
+
+function toggleFavorite(app) {
+  const provider = appProvider(app);
+  const active = isFavorite(app);
+  if (active) {
+    state.favorites = state.favorites.filter(item => !sameApp(item, provider, app.id));
+  } else {
+    state.favorites = [appSnapshot(app), ...state.favorites];
+  }
+  saveStoredApps(FAVORITES_KEY, state.favorites);
+  toast(active ? "Favorilerden çıkarıldı." : "Favorilere eklendi.", "success");
+  renderChrome();
+  if (state.route.name === "favorites") renderFavorites();
+  else if (["search", "installed", "category"].includes(state.route.name)) renderRoute();
+  else if (state.route.name === "detail") renderDetail();
+  else renderIf("discover", renderDiscover);
+  return !active;
+}
+
+function rememberRecent(app) {
+  if (!app?.id) return;
+  const snapshot = appSnapshot(app);
+  state.recents = [
+    snapshot,
+    ...state.recents.filter(item => !sameApp(item, snapshot.provider, snapshot.id)),
+  ].slice(0, RECENTS_LIMIT);
+  saveStoredApps(RECENTS_KEY, state.recents);
+}
+
+function syncStoredApp(app) {
+  const provider = appProvider(app);
+  let changed = false;
+  for (const list of [state.favorites, state.recents]) {
+    const item = list.find(entry => sameApp(entry, provider, app.id));
+    if (!item) continue;
+    item.installed = Boolean(app.installed);
+    item.updateAvailable = Boolean(app.updateAvailable);
+    if (app.version) item.version = app.version;
+    changed = true;
+  }
+  if (changed) {
+    saveStoredApps(FAVORITES_KEY, state.favorites);
+    saveStoredApps(RECENTS_KEY, state.recents);
+  }
+}
+
+function syncStoredFromInstalled() {
+  const byKey = new Map(state.installed.map(app => [selectionKey(appProvider(app), app.id), app]));
+  let changed = false;
+  for (const list of [state.favorites, state.recents]) {
+    for (const item of list) {
+      const live = byKey.get(selectionKey(appProvider(item), item.id));
+      const installed = Boolean(live);
+      if (item.installed !== installed) {
+        item.installed = installed;
+        changed = true;
+      }
+      if (live && item.version !== live.version) {
+        item.version = live.version || "";
+        changed = true;
+      }
+      if (item.updateAvailable !== Boolean(live?.updateAvailable)) {
+        item.updateAvailable = Boolean(live?.updateAvailable);
+        changed = true;
+      }
+    }
+  }
+  if (changed) {
+    saveStoredApps(FAVORITES_KEY, state.favorites);
+    saveStoredApps(RECENTS_KEY, state.recents);
+  }
 }
 
 function providerCounts(apps) {
@@ -315,9 +442,12 @@ const state = {
   updatesOnly: false,
   installedProvider: "all",
   installedSort: "name",
+  installedQuery: "",
   selectionMode: false,
   selection: new Set(),
   lastRefreshed: null,
+  favorites: [],
+  recents: [],
   cliApp: null,
   cliCommands: [],
   category: null,
@@ -363,12 +493,14 @@ const els = {
   logButton: $("#logButton"),
   shortcutsButton: $("#shortcutsButton"),
   installedCount: $("#installedCount"),
+  favoritesCount: $("#favoritesCount"),
   statusDot: $("#statusDot"),
   statusText: $("#statusText"),
   discoverView: $("#discoverView"),
   searchView: $("#searchView"),
   categoriesView: $("#categoriesView"),
   categoryView: $("#categoryView"),
+  favoritesView: $("#favoritesView"),
   installedView: $("#installedView"),
   detailView: $("#detailView"),
   settingsView: $("#settingsView"),
@@ -556,7 +688,7 @@ function sanitizeDescription(html) {
 
 function appIconHtml(app, extraClass = "") {
   const source = imageUrl(app?.icon);
-  return `<span class="app-icon${extraClass ? ` ${extraClass}` : ""}"><img class="app-img${source ? "" : " is-fallback"}" src="${source || FALLBACK_ICON}" alt="" loading="lazy"${source ? "" : ' data-fallback="1"'} /></span>`;
+  return `<span class="app-icon${extraClass ? ` ${extraClass}` : ""}"><img class="app-img${source ? "" : " is-fallback"}" src="${source || FALLBACK_ICON}" alt="" loading="lazy" decoding="async"${source ? "" : ' data-fallback="1"'} /></span>`;
 }
 
 function appTagsHtml(app, context = "") {
@@ -624,8 +756,7 @@ function matchesApps(provider, id) {
 }
 
 
-function actionButtonsHtml(app, { large = false, hero = false, allowRemove = true } = {}) {
-  const size = large ? "btn-lg" : "btn-sm";
+function actionButtonsHtml(app, { large = false, hero = false, allowRemove = true } = {}) {  const size = large ? "btn-lg" : "btn-sm";
   const primary = hero ? `btn btn-hero-primary ${size}` : `btn btn-primary ${size}`;
   const ghost = hero ? `btn btn-hero-ghost ${size}` : `btn btn-ghost ${size}`;
   const id = attr(app.id);
@@ -706,7 +837,7 @@ function pickCardHtml(app) {
   return `
     <article class="pick-card" data-open-app="${attr(app.id)}" data-provider="${attr(appProvider(app))}" tabindex="0" role="link" aria-label="${attr(app.name || app.id)} (${attr(providerLabel(app))}) ayrıntıları">
       <div class="pick-media${hero ? "" : " is-placeholder"}">
-        ${hero ? `<img src="${hero}" alt="" loading="lazy" />` : ""}
+        ${hero ? `<img src="${hero}" alt="" loading="lazy" decoding="async" />` : ""}
       </div>
       <div class="pick-body">
         ${appIconHtml(app)}
@@ -1836,7 +1967,7 @@ function heroHtml(app) {
 
   return `
     <article class="hero-card" data-open-app="${attr(app.id)}" data-provider="${attr(appProvider(app))}" tabindex="0" role="link" aria-label="${attr(app.name || app.id)} (${attr(providerLabel(app))}) ayrıntıları">
-      <div class="hero-media${hero ? "" : " is-placeholder"}">${hero ? `<img src="${hero}" alt="" />` : ""}</div>
+      <div class="hero-media${hero ? "" : " is-placeholder"}">${hero ? `<img src="${hero}" alt="" decoding="async" fetchpriority="high" />` : ""}</div>
       <div class="hero-scrim"></div>
       <div class="hero-content">
         <span class="hero-kicker">Günün uygulaması</span>
@@ -2478,7 +2609,7 @@ function renderDetail() {
         <div class="shots${screenshots.length === 1 ? " single" : ""}">
           ${screenshots.map((shot, index) => `
             <figure class="shot" data-shot="${index}" tabindex="0" role="button" aria-label="Görseli büyüt">
-              <img class="shot-img" src="${imageUrl(shot.url)}" alt="${attr(shot.caption || `${app.name} ekran görüntüsü`)}" loading="lazy" />
+              <img class="shot-img" src="${imageUrl(shot.url)}" alt="${attr(shot.caption || `${app.name} ekran görüntüsü`)}" loading="lazy" decoding="async" />
               ${shot.caption ? `<figcaption>${escapeHtml(shot.caption)}</figcaption>` : ""}
             </figure>`).join("")}
         </div>

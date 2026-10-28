@@ -834,6 +834,14 @@ input:focus-visible,
   transition: background-color var(--ease), border-color var(--ease);
 }
 
+.app-row,
+.app-tile {
+  content-visibility: auto;
+}
+
+.app-row { contain-intrinsic-size: auto 74px; }
+.app-tile { contain-intrinsic-size: auto 142px; }
+
 .app-row:hover { background: var(--surface-hover); border-color: var(--line-strong); }
 
 .app-icon {
