@@ -1,4 +1,4 @@
-/* Macro Store — Flathub tabanlı mağaza arayüzü.
+/* Macro Store — Flatpak, Snap, Homebrew ve AppImage kaynaklarını yöneten mağaza arayüzü.
    Framework ya da derleme adımı yok; düşük bellek kullanımı için saf JavaScript. */
 
 const TAURI = window.__TAURI__;
@@ -15,7 +15,26 @@ const ACTIONS = {
   install: { busy: "Kuruluyor…", verb: "kuruluyor", done: "Kurulum tamamlandı." },
   update: { busy: "Güncelleniyor…", verb: "güncelleniyor", done: "Güncelleme tamamlandı." },
   remove: { busy: "Kaldırılıyor…", verb: "kaldırılıyor", done: "Kaldırma tamamlandı." },
+  launch: { busy: "Açılıyor…", verb: "açılıyor", done: "Uygulama açıldı." },
 };
+
+const SOURCES = {
+  flatpak: { label: "Flatpak", tagClass: "is-flatpak" },
+  snap: { label: "Snap", tagClass: "is-snap" },
+  homebrew: { label: "Homebrew", tagClass: "is-homebrew" },
+  appimage: { label: "AppImage", tagClass: "is-appimage" },
+};
+
+const ACCENTS = [
+  { id: "default", label: "Varsayılan" },
+  { id: "red", label: "Kırmızı" },
+  { id: "blue", label: "Mavi" },
+  { id: "green", label: "Yeşil" },
+  { id: "yellow", label: "Sarı" },
+  { id: "purple", label: "Mor" },
+];
+
+const APP_VERSION = "0.4.0";
 
 const FALLBACK_ICON = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(
   `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" fill="none">
@@ -124,6 +143,12 @@ const state = {
   installedError: "",
   installedSeq: 0,
   updatesOnly: false,
+  sourceFilter: "all",
+  sourceDiscover: {
+    snap: { apps: [], loading: false, error: "", loaded: false, seq: 0 },
+    homebrew: { apps: [], loading: false, error: "", loaded: false, seq: 0 },
+  },
+  appimage: { picking: false, importing: false },
   category: null,
   categoryLoading: false,
   categoryError: "",
@@ -187,6 +212,12 @@ const els = {
   confirmTitle: $("#confirmTitle"),
   confirmText: $("#confirmText"),
   confirmAccept: $("#confirmAccept"),
+  appimageModal: $("#appimageModal"),
+  appimagePath: $("#appimagePath"),
+  appimageName: $("#appimageName"),
+  appimageError: $("#appimageError"),
+  appimagePick: $("#appimagePick"),
+  appimageImport: $("#appimageImport"),
   lightbox: $("#lightbox"),
   lightboxImage: $("#lightboxImage"),
   lightboxCaption: $("#lightboxCaption"),
@@ -296,6 +327,58 @@ function setTheme(theme) {
   try { localStorage.setItem("macro-theme", next); } catch { /* yoksay */ }
 }
 
+function currentAccent() {
+  const value = document.documentElement.dataset.accent;
+  return ACCENTS.some(accent => accent.id === value) ? value : "default";
+}
+
+function setAccent(accent) {
+  const next = ACCENTS.some(item => item.id === accent) ? accent : "default";
+  document.documentElement.dataset.accent = next;
+  try { localStorage.setItem("macro-accent", next); } catch { /* yoksay */ }
+}
+
+function lowPowerEnabled() {
+  return document.documentElement.dataset.lowPower === "1";
+}
+
+function setLowPower(enabled) {
+  if (enabled) document.documentElement.dataset.lowPower = "1";
+  else delete document.documentElement.dataset.lowPower;
+  try { localStorage.setItem("macro-low-power", enabled ? "1" : "0"); } catch { /* yoksay */ }
+}
+
+function appSource(app) {
+  const source = String(app?.source || "").toLowerCase();
+  if (SOURCES[source]) return source;
+  const id = String(app?.id || "");
+  const prefix = id.includes(":") ? id.split(":")[0] : "";
+  return SOURCES[prefix] ? prefix : "flatpak";
+}
+
+function scopeLabel(scope) {
+  const value = String(scope || "").toLowerCase();
+  if (value === "both") return "Kullanıcı + sistem";
+  if (value === "system") return "Sistem";
+  if (value === "user") return "Kullanıcı";
+  return "";
+}
+
+function findAppById(id) {
+  if (!id) return null;
+  if (state.detail?.app?.id === id) return state.detail.app;
+  return state.installed.find(item => item.id === id)
+    || state.searchResults.find(item => item.id === id)
+    || (state.discover?.appOfDay?.id === id ? state.discover.appOfDay : null)
+    || state.discover?.picks?.find(item => item.id === id)
+    || state.discover?.popular?.find(item => item.id === id)
+    || state.discover?.recent?.find(item => item.id === id)
+    || state.sourceDiscover.snap.apps.find(item => item.id === id)
+    || state.sourceDiscover.homebrew.apps.find(item => item.id === id)
+    || state.category?.apps?.find(item => item.id === id)
+    || null;
+}
+
 function sanitizeDescription(html) {
   const raw = String(html || "").trim();
   if (!raw) return "";
@@ -347,6 +430,14 @@ function appIconHtml(app, extraClass = "") {
 
 function appTagsHtml(app, context = "") {
   const tags = [];
+  const source = appSource(app);
+  tags.push(`<span class="tag tag-source ${SOURCES[source].tagClass}">${SOURCES[source].label}</span>`);
+  if (app.scope && (source === "flatpak" || source === "appimage")) {
+    const scope = scopeLabel(app.scope);
+    if (scope && context === "installed") tags.push(`<span class="tag tag-scope">${escapeHtml(scope)}</span>`);
+  }
+  if (source === "snap" && app.classic) tags.push('<span class="tag tag-scope">Klasik</span>');
+  if (source === "homebrew" && app.kind === "cask") tags.push('<span class="tag tag-scope">Cask</span>');
   if (app.updateAvailable) tags.push('<span class="tag tag-update">Güncelleme</span>');
   if (context === "search" && app.installed) tags.push('<span class="tag">Yüklü</span>');
   return tags.join("");
@@ -373,6 +464,7 @@ function actionButtonsHtml(app, { large = false, hero = false, allowRemove = tru
   const ghost = hero ? `btn btn-hero-ghost ${size}` : `btn btn-ghost ${size}`;
   const id = attr(app.id);
   const locked = state.busy ? " disabled" : "";
+  const source = appSource(app);
 
   if (state.busy && state.busy.id === app.id) {
     const label = ACTIONS[state.busy.action]?.busy || "İşleniyor…";
@@ -384,7 +476,9 @@ function actionButtonsHtml(app, { large = false, hero = false, allowRemove = tru
   }
 
   const buttons = [];
-  if (app.updateAvailable) {
+  if (source === "appimage") {
+    buttons.push(`<button class="${primary}" type="button" data-action="launch" data-id="${id}"${locked}>Aç</button>`);
+  } else if (app.updateAvailable) {
     buttons.push(`<button class="${primary}" type="button" data-action="update" data-id="${id}"${locked}>Güncelle</button>`);
   }
   if (allowRemove) {
@@ -427,7 +521,7 @@ function appTileHtml(app) {
       <h3>${escapeHtml(app.name || app.id)}</h3>
       ${summary ? `<p>${escapeHtml(summary)}</p>` : ""}
       <div class="tile-foot">
-        <span>${escapeHtml(developer || "Flathub")}</span>
+        <span>${escapeHtml(developer || SOURCES[appSource(app)].label)}</span>
         ${app.monthlyInstalls ? '<span class="dot">·</span><span>' + escapeHtml(`${formatCount(app.monthlyInstalls)} kurulum`) + "</span>" : ""}
       </div>
     </article>`;
@@ -444,7 +538,7 @@ function pickCardHtml(app) {
         ${appIconHtml(app)}
         <div class="pick-text">
           <h3>${escapeHtml(app.name || app.id)}</h3>
-          <p>${escapeHtml(app.developer || (app.category ? categoryName(app.category) : "Flathub"))}</p>
+          <p>${escapeHtml(app.developer || SOURCES[appSource(app)].label)}</p>
         </div>
       </div>
     </article>`;
@@ -521,6 +615,11 @@ function syncStoreInfoFromSetup(status) {
     flatpakVersion: status.flatpakVersion || null,
     flathubAvailable: Boolean(status.flathubAvailable),
     userFlathubAvailable: Boolean(status.userFlathubAvailable),
+    snapAvailable: Boolean(status.snapAvailable),
+    snapVersion: status.snapVersion || null,
+    brewAvailable: Boolean(status.brewAvailable),
+    brewVersion: status.brewVersion || null,
+    appimageCount: Number(state.storeInfo?.appimageCount) || 0,
   };
   renderChrome();
 }
@@ -569,6 +668,16 @@ function setupFactsHtml(status) {
     : status.flathubAvailable
       ? "Sistem deposu var · kullanıcı deposu eksik"
       : "Eklenmeli";
+  const snapValue = status.snapAvailable
+    ? (status.snapVersion || "Kurulu")
+    : status.snapInstallSupported
+      ? "Kurulabilir"
+      : "Kurulu değil";
+  const brewValue = status.brewAvailable
+    ? (status.brewVersion || "Kurulu")
+    : status.brewInstallSupported
+      ? "Kurulabilir"
+      : "Kurulu değil";
   const meta = [
     status.distroName || "Linux",
     status.packageManagerLabel || status.packageManager || "Paket yöneticisi algılanamadı",
@@ -578,6 +687,8 @@ function setupFactsHtml(status) {
     <div class="setup-facts">
       ${setupFactHtml(Boolean(status.flatpakAvailable), "Flatpak", flatpakValue)}
       ${setupFactHtml(Boolean(status.userFlathubAvailable), "Flathub", flathubValue)}
+      ${setupFactHtml(Boolean(status.snapAvailable), "Snap", snapValue)}
+      ${setupFactHtml(Boolean(status.brewAvailable), "Homebrew", brewValue)}
     </div>
     <p class="setup-distro">${meta}</p>`;
 }
@@ -604,6 +715,12 @@ function setupManualHtml(status, open = false) {
     rows.push(setupCommandHtml("Flatpak kurulduktan sonra Flathub’ı ekle", status.flathubCommand));
   } else if (!status.userFlathubAvailable && status.flathubCommand) {
     rows.push(setupCommandHtml("Flathub kullanıcı deposunu ekle", status.flathubCommand));
+  }
+  if (!status.snapAvailable && status.snapManualCommand) {
+    rows.push(setupCommandHtml("Snap’i kur", status.snapManualCommand));
+  }
+  if (!status.brewAvailable && status.brewManualCommand) {
+    rows.push(setupCommandHtml("Homebrew’u kur", status.brewManualCommand));
   }
   if (!rows.length) return "";
 
@@ -647,11 +764,11 @@ function renderSetup() {
   const status = state.setup.status;
   const setup = state.setup;
   const loading = setup.loading && !status;
-  let title = "Flatpak denetleniyor";
-  let subtitle = "Flatpak ve Flathub durumu kontrol ediliyor.";
+  let title = "Sistem denetleniyor";
+  let subtitle = "Flatpak, Snap ve Homebrew durumu kontrol ediliyor.";
 
   if (setup.running) {
-    title = status?.flatpakAvailable ? "Flathub hazırlanıyor" : "Flatpak kuruluyor";
+    title = setup.phase || (status?.flatpakAvailable ? "Flathub hazırlanıyor" : "Kurulum sürüyor");
     subtitle = "Kurulum tamamlanana kadar bu pencereyi kapatmayın.";
   } else if (setup.error) {
     title = "Kurulum tamamlanamadı";
@@ -660,8 +777,8 @@ function renderSetup() {
     title = "Yeniden başlatma gerekiyor";
     subtitle = "Flatpak katmanı yeniden başlatmadan etkinleşmez.";
   } else if (status?.ready) {
-    title = "Her şey hazır";
-    subtitle = "Flatpak ve Flathub kullanıma hazır.";
+    title = "Flatpak akışı hazır";
+    subtitle = "Flathub hazır. Snap ve Homebrew’u dilediğiniz zaman ekleyebilirsiniz.";
   } else if (status?.flatpakAvailable) {
     title = "Flathub deposu eksik";
     subtitle = "Kullanıcı kapsamına Flathub deposunu ekleyin.";
@@ -670,7 +787,7 @@ function renderSetup() {
     subtitle = "Mağaza için gerekli Flatpak bileşeni hazırlanacak.";
   } else if (loading) {
     title = "Sistem denetleniyor";
-    subtitle = "Flatpak ve Flathub durumu kontrol ediliyor.";
+    subtitle = "Flatpak, Snap ve Homebrew durumu kontrol ediliyor.";
   }
 
   els.setupTitle.textContent = title;
@@ -696,7 +813,7 @@ function renderSetup() {
       <div class="setup-loading">
         <span class="spinner" aria-hidden="true"></span>
         <div>
-          <h3>Flatpak ve Flathub denetleniyor</h3>
+          <h3>Sistem kaynakları denetleniyor</h3>
           <p>Sistem bilgileri ve paket yöneticisi algılanıyor…</p>
         </div>
       </div>`;
@@ -753,26 +870,33 @@ function renderSetup() {
       <div class="setup-message is-success">
         ${ICON.check}
         <div>
-          <h3>Macro Store kullanıma hazır</h3>
-          <p>Flatpak ${escapeHtml(status.flatpakVersion || "")} ve Flathub kullanıcı deposu hazır. Keşfet’ten uygulama kurabilirsiniz.</p>
+          <h3>Flatpak ve Flathub hazır</h3>
+          <p>Flatpak ${escapeHtml(status.flatpakVersion || "")} ve Flathub kullanıcı deposu hazır. Snap ve Homebrew’u buradan kurabilir, AppImage dosyalarını Yüklü Uygulamalar ekranından içe aktarabilirsiniz.</p>
         </div>
       </div>
       ${setupFactsHtml(status)}
       ${setupActionsHtml([
         '<button class="btn btn-primary" type="button" data-setup-finish>Mağazayı aç</button>',
+        !status.snapAvailable && status.snapInstallSupported
+          ? '<button class="btn btn-ghost" type="button" data-install-source="snap">Snap’i kur</button>'
+          : "",
+        !status.brewAvailable && status.brewInstallSupported
+          ? '<button class="btn btn-ghost" type="button" data-install-source="homebrew">Homebrew’u kur</button>'
+          : "",
         '<button class="btn btn-ghost" type="button" data-setup-close>Kapat</button>',
-      ])}
+      ].filter(Boolean))}
       ${setupLogsHtml()}`;
   } else if (!status.flatpakAvailable) {
     const supported = Boolean(status.installSupported);
+    const hasAlternative = Boolean(status.snapAvailable || status.brewAvailable);
     body = `
       <div class="setup-message is-warning">
         ${ICON.warning}
         <div>
           <h3>Flatpak kurulu değil</h3>
           <p>${supported
-            ? "Macro Store uygulamaları Flatpak ile kurar. Dağıtımınıza uygun paket yöneticisiyle Flatpak’ı kurup Flathub deposunu hazırlayabiliriz."
-            : "Macro Store uygulamaları Flatpak ile kurar. Bu dağıtımda otomatik kurulum desteklenmiyor; aşağıdaki komutları terminalde çalıştırabilirsiniz."}</p>
+            ? "Flathub uygulamaları için Flatpak gerekir. Dağıtımınıza uygun paket yöneticisiyle Flatpak’ı kurup Flathub deposunu hazırlayabiliriz."
+            : "Flathub uygulamaları için Flatpak gerekir. Bu dağıtımda otomatik kurulum desteklenmiyor; aşağıdaki komutları terminalde çalıştırabilirsiniz."}${hasAlternative ? " Snap ve Homebrew kaynakları kullanılabilir." : ""}</p>
         </div>
       </div>
       ${setupFactsHtml(status)}
@@ -784,6 +908,9 @@ function renderSetup() {
       ${setupActionsHtml([
         supported
           ? '<button class="btn btn-primary" type="button" data-setup-install>Flatpak’ı kur ve hazırla</button>'
+          : "",
+        hasAlternative
+          ? '<button class="btn btn-ghost" type="button" data-setup-finish>Mağazayı aç</button>'
           : "",
         '<button class="btn btn-ghost" type="button" data-setup-refresh>Durumu yenile</button>',
         '<button class="btn btn-ghost" type="button" data-setup-close>Daha sonra</button>',
@@ -846,10 +973,16 @@ function finishSetup() {
 async function refreshStoreAfterSetup() {
   state.remotesLoaded = false;
   state.installedLoaded = false;
+  for (const entry of Object.values(state.sourceDiscover)) {
+    entry.loaded = false;
+    entry.seq += 1;
+  }
   await loadStoreInfo();
   loadInstalled(true, true);
   loadRemotes(true);
-  if (state.route.name === "discover") loadDiscover(true);
+  if (state.route.name === "discover") {
+    loadDiscover(true);
+  }
   if (state.route.name === "installed") loadInstalled(true);
 }
 
@@ -979,23 +1112,68 @@ async function runSetupInstall() {
   }
 }
 
+async function installSource(source) {
+  if (state.setup.running) return;
+  const label = source === "snap" ? "Snap" : source === "homebrew" ? "Homebrew" : "Kaynak";
+  if (source !== "snap" && source !== "homebrew") return;
+
+  state.setup.running = true;
+  state.setup.error = "";
+  state.setup.logs = [];
+  state.setup.phase = `${label} kuruluyor…`;
+  renderSetup();
+  openSetupModal({ refresh: false });
+
+  let status = null;
+  try {
+    status = await invoke(source === "snap" ? "install_snap" : "install_homebrew");
+    state.setup.status = status;
+    syncStoreInfoFromSetup(status);
+    state.setup.phase = `${label} hazır`;
+    localStorage.setItem(SETUP_SEEN_KEY, "1");
+    toast(`${label} kullanıma hazır.`, "success");
+  } catch (err) {
+    state.setup.error = errText(err);
+    toast(state.setup.error, "error");
+  } finally {
+    state.setup.running = false;
+    renderSetup();
+    if (status) {
+      await refreshStoreAfterSetup();
+      if (state.route.name === "settings") renderSettings();
+    }
+  }
+}
+
 /* ── Gezinme ve veri yükleme ───────────────────────── */
 
 function updateStatus() {
-  if (!state.storeInfo) {
+  const info = state.storeInfo;
+  if (!info) {
     els.statusDot.className = "status-dot is-pending";
-    els.statusText.textContent = "Flatpak denetleniyor…";
+    els.statusText.textContent = "Sistem denetleniyor…";
     return;
   }
-  if (!state.storeInfo.flatpakAvailable) {
+  const parts = [];
+  let degraded = false;
+  if (info.flatpakAvailable) {
+    const hasFlathub = Boolean(info.flathubAvailable || info.userFlathubAvailable);
+    parts.push("Flatpak");
+    if (!hasFlathub) degraded = true;
+  }
+  if (info.snapAvailable) parts.push("Snap");
+  if (info.brewAvailable) parts.push("Homebrew");
+  if (!parts.length) {
     els.statusDot.className = "status-dot is-error";
-    els.statusText.textContent = "Flatpak bulunamadı";
+    els.statusText.textContent = "Paket kaynağı bulunamadı";
     return;
   }
-  const hasFlathub = state.storeInfo.flathubAvailable || state.storeInfo.userFlathubAvailable;
-  const version = state.storeInfo.flatpakVersion ? `Flatpak ${state.storeInfo.flatpakVersion}` : "Flatpak";
-  els.statusDot.className = `status-dot ${hasFlathub ? "is-ok" : "is-error"}`;
-  els.statusText.textContent = hasFlathub ? `Flathub · ${version}` : `Depo yok · ${version}`;
+  const appimages = Number(info.appimageCount) || 0;
+  if (appimages > 0) parts.push(`${appimages} AppImage`);
+  els.statusDot.className = `status-dot ${degraded ? "is-error" : "is-ok"}`;
+  els.statusText.textContent = degraded
+    ? `${parts.join(" · ")} · Flathub deposu yok`
+    : parts.join(" · ");
 }
 
 function updateInstalledCount() {
@@ -1013,7 +1191,7 @@ function updatePageTitle() {
   } else if (route.name === "search" && state.query) {
     document.title = state.query.length >= 2 ? `“${state.query}” — Macro Store` : "Arama — Macro Store";
   } else {
-    document.title = "Macro Store — Flathub Mağazası";
+    document.title = "Macro Store — Linux Uygulama Mağazası";
   }
 }
 
@@ -1090,6 +1268,72 @@ async function loadStoreInfo() {
     state.storeInfo = null;
   }
   renderChrome();
+  if (state.route.name === "discover") renderDiscover();
+  if (state.route.name === "settings") renderSettings();
+}
+
+function discoverSources() {
+  const info = state.storeInfo;
+  const setup = state.setup.status;
+  const snapReady = setup ? Boolean(setup.snapAvailable) : Boolean(info?.snapAvailable);
+  const brewReady = setup ? Boolean(setup.brewAvailable) : Boolean(info?.brewAvailable);
+  const sources = [];
+  if (snapReady) sources.push("snap");
+  if (brewReady) sources.push("homebrew");
+  return sources;
+}
+
+async function loadSourceDiscover(source, force = false) {
+  const entry = state.sourceDiscover[source];
+  if (!entry) return;
+  if (!force && (entry.loaded || entry.loading)) return;
+  if (entry.loading && !force) return;
+
+  const seq = ++entry.seq;
+  entry.loading = true;
+  entry.error = "";
+  renderIf("discover", renderDiscover);
+
+  try {
+    const apps = await invoke("get_source_discover", { source });
+    if (seq !== entry.seq) return;
+    entry.apps = Array.isArray(apps) ? apps : [];
+    entry.loaded = true;
+  } catch (err) {
+    if (seq !== entry.seq) return;
+    entry.error = errText(err);
+  } finally {
+    if (seq === entry.seq) {
+      entry.loading = false;
+      renderIf("discover", renderDiscover);
+    }
+  }
+}
+
+let sourceObserver = null;
+
+function observeSourceSections() {
+  const nodes = $$("#discoverView [data-source-lazy]");
+  if (!nodes.length) {
+    if (sourceObserver) sourceObserver.disconnect();
+    return;
+  }
+  if (typeof IntersectionObserver !== "function") {
+    for (const node of nodes) loadSourceDiscover(node.dataset.sourceLazy);
+    return;
+  }
+  if (!sourceObserver) {
+    sourceObserver = new IntersectionObserver(entries => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        const source = entry.target.dataset.sourceLazy;
+        sourceObserver.unobserve(entry.target);
+        if (source) loadSourceDiscover(source);
+      }
+    }, { rootMargin: "240px 0px" });
+  }
+  sourceObserver.disconnect();
+  for (const node of nodes) sourceObserver.observe(node);
 }
 
 async function loadDiscover(force = false) {
@@ -1279,7 +1523,7 @@ async function loadDetail(id, force = false) {
   renderIf("detail", renderDetail);
 
   try {
-    const data = await invoke("get_app_detail", { appId: id });
+    const data = await invoke("get_app_detail", { id });
     if (seq !== state.detailSeq) return;
     state.detail = data;
   } catch (err) {
@@ -1477,6 +1721,7 @@ function renderDiscover() {
   const popular = Array.isArray(data.popular) ? data.popular : [];
   const recent = Array.isArray(data.recent) ? data.recent : [];
   const hero = data.appOfDay;
+  const sources = discoverSources();
 
   const sections = [];
   if (picks.length) {
@@ -1510,6 +1755,35 @@ function renderDiscover() {
       </section>`);
   }
 
+  for (const source of sources) {
+    const entry = state.sourceDiscover[source];
+    if (!entry) continue;
+    let content = "";
+    if (entry.apps.length) {
+      content = `<div class="app-list">${entry.apps.map(app => appRowHtml(app, "discover")).join("")}</div>`;
+    } else if (entry.loading) {
+      content = skeletonRows(2);
+    } else if (entry.error) {
+      content = `<div class="source-lazy is-error">
+        <span>Vitrin yüklenemedi: ${escapeHtml(entry.error)}</span>
+        <button class="btn btn-ghost btn-sm" type="button" data-source-retry="${source}">Yeniden dene</button>
+      </div>`;
+    } else {
+      content = `<div class="source-lazy" data-source-lazy="${source}">
+        <span class="spinner" aria-hidden="true"></span>
+        <span>Vitrin yükleniyor…</span>
+      </div>`;
+    }
+    sections.push(`
+      <section>
+        <div class="section-head">
+          <h2>${source === "snap" ? "Snap vitrini" : "Homebrew vitrini"}</h2>
+          <p>${source === "snap" ? "Snap Store’dan öne çıkanlar" : "Popüler formüller ve casks"}</p>
+        </div>
+        ${content}
+      </section>`);
+  }
+
   const body = hero || sections.length
     ? `${hero ? heroHtml(hero) : ""}${sections.join("")}`
     : stateHtml({
@@ -1525,11 +1799,15 @@ function renderDiscover() {
       <div class="view-title">
         <p class="eyebrow">Flathub</p>
         <h1>Keşfet</h1>
-        <p class="view-sub">Öne çıkan uygulamalar, haftanın seçkileri ve yeni eklenenler.</p>
+        <p class="view-sub">${sources.length
+          ? "Flathub, Snap ve Homebrew kaynaklarından öne çıkanlar."
+          : "Öne çıkan uygulamalar, haftanın seçkileri ve yeni eklenenler."}</p>
       </div>
       <p class="view-note">${escapeHtml(formatISODate(data.date))}</p>
     </header>
     ${body}`;
+
+  observeSourceSections();
 }
 
 function renderSearch() {
@@ -1563,7 +1841,7 @@ function renderSearch() {
   } else if (!count) {
     body = stateHtml({
       title: "Sonuç bulunamadı",
-      text: `“${query}” için Flathub’da uygulama bulunamadı.\nFarklı bir ad ya da anahtar kelime deneyin.`,
+      text: `“${query}” için uygulama bulunamadı.\nFarklı bir ad ya da anahtar kelime deneyin.`,
       retry: "search",
       icon: ICON.search,
     });
@@ -1576,7 +1854,7 @@ function renderSearch() {
       <div class="view-title">
         <p class="eyebrow">Arama</p>
         <h1>“${escapeHtml(query)}”</h1>
-        <p class="view-sub">Flathub kataloğunda arama</p>
+        <p class="view-sub">${discoverSources().length ? "Flatpak, Snap ve Homebrew kaynaklarında arama" : "Flathub kataloğunda arama"}</p>
       </div>
       <p class="view-note">${escapeHtml(meta)}</p>
     </header>
@@ -1661,10 +1939,33 @@ function renderCategory() {
     ${body}`;
 }
 
+function sourceCounts() {
+  const counts = { all: state.installed.length, flatpak: 0, snap: 0, homebrew: 0, appimage: 0 };
+  for (const app of state.installed) {
+    const source = appSource(app);
+    counts[source] = (counts[source] || 0) + 1;
+  }
+  return counts;
+}
+
 function renderInstalled() {
+  const counts = sourceCounts();
   const updates = state.installed.filter(app => app.updateAvailable).length;
   if (!updates) state.updatesOnly = false;
-  const visible = state.updatesOnly ? state.installed.filter(app => app.updateAvailable) : state.installed;
+  if (state.sourceFilter !== "all" && !counts[state.sourceFilter]) state.sourceFilter = "all";
+
+  let visible = state.installed;
+  if (state.sourceFilter !== "all") {
+    visible = visible.filter(app => appSource(app) === state.sourceFilter);
+  }
+  if (state.updatesOnly) visible = visible.filter(app => app.updateAvailable);
+
+  const filters = [
+    `<button class="chip" type="button" data-source-filter="all" aria-pressed="${state.sourceFilter === "all"}">Tümü <span>${counts.all}</span></button>`,
+    ...Object.keys(SOURCES)
+      .filter(source => counts[source] > 0)
+      .map(source => `<button class="chip" type="button" data-source-filter="${source}" aria-pressed="${state.sourceFilter === source}">${SOURCES[source].label} <span>${counts[source]}</span></button>`),
+  ];
 
   let body;
   if (state.installedLoading && !state.installed.length) {
@@ -1678,14 +1979,22 @@ function renderInstalled() {
     });
   } else if (!visible.length) {
     body = stateHtml({
-      title: state.updatesOnly ? "Güncelleme yok" : "Henüz yüklü uygulama yok",
+      title: state.updatesOnly
+        ? "Güncelleme yok"
+        : state.sourceFilter !== "all"
+          ? `${SOURCES[state.sourceFilter].label} uygulaması yok`
+          : "Henüz yüklü uygulama yok",
       text: state.updatesOnly
-        ? "Tüm kullanıcı uygulamaları güncel görünüyor."
-        : "Flathub’dan bir uygulama kurduğunuzda burada görünür.",
+        ? "Tüm uygulamalar güncel görünüyor."
+        : state.sourceFilter !== "all"
+          ? "Bu kaynaktan yüklü bir uygulama bulunmuyor. Farklı bir kaynak filtresi seçin."
+          : "Flatpak, Snap ve Homebrew kaynaklarından kurduğunuz uygulamalar burada görünür. AppImage dosyalarını da içe aktarabilirsiniz.",
       icon: ICON.box,
       action: state.updatesOnly
         ? ""
-        : '<button class="btn btn-ghost" type="button" data-nav="discover">Keşfet’e göz at</button>',
+        : state.sourceFilter !== "all"
+          ? '<button class="btn btn-ghost" type="button" data-source-filter="all">Tümünü göster</button>'
+          : '<button class="btn btn-ghost" type="button" data-nav="discover">Keşfet’e göz at</button>',
     });
   } else {
     body = `<div class="app-list">${visible.map(app => appRowHtml(app, "installed")).join("")}</div>`;
@@ -1698,11 +2007,15 @@ function renderInstalled() {
         <h1>Yüklü Uygulamalar</h1>
         <p class="view-sub">${state.installed.length} uygulama${updates ? ` · ${updates} güncelleme` : ""}</p>
       </div>
-      ${updates ? `<button class="chip" type="button" data-updates-filter aria-pressed="${state.updatesOnly}">
-        Güncellemeler <span>${updates}</span>
-      </button>` : ""}
+      <div class="view-head-actions">
+        ${updates ? `<button class="chip" type="button" data-updates-filter aria-pressed="${state.updatesOnly}">
+          Güncellemeler <span>${updates}</span>
+        </button>` : ""}
+        <button class="btn btn-ghost btn-sm" type="button" data-appimage-open>AppImage ekle</button>
+      </div>
     </header>
     ${storeNoticeHtml()}
+    ${state.installed.length ? `<div class="filter-row">${filters.join("")}</div>` : ""}
     ${body}`;
 }
 
@@ -1712,8 +2025,15 @@ function detailActionButtons(app) {
 
 function infoCardHtml(detail) {
   const app = detail.app;
+  const source = appSource(app);
   const rows = [];
+  rows.push(["Kaynak", SOURCES[source].label]);
   if (app.version) rows.push(["Sürüm", app.version]);
+  if (source === "homebrew" && app.kind) rows.push(["Tür", app.kind === "cask" ? "Cask" : "Formül"]);
+  if (app.scope) {
+    const scope = scopeLabel(app.scope);
+    if (scope) rows.push(["Kapsam", scope]);
+  }
   if (app.category) rows.push(["Kategori", categoryName(app.category)]);
   if (detail.license) rows.push(["Lisans", detail.license]);
   if (detail.downloadSize) rows.push(["İndirme boyutu", formatBytes(detail.downloadSize)]);
@@ -1817,10 +2137,26 @@ function renderDetail() {
   }
 
   const app = detail.app;
+  const source = appSource(app);
+  const sourceMeta = SOURCES[source];
   const screenshots = Array.isArray(detail.screenshots) ? detail.screenshots : [];
   const reviews = Array.isArray(detail.reviews) ? detail.reviews : [];
   const categories = Array.isArray(detail.categories) ? detail.categories : [];
+  const detailSource = source === "flatpak"
+    ? "Flathub · Flatpak"
+    : source === "snap"
+      ? "Snap Store · Snap"
+      : source === "homebrew"
+        ? `Homebrew · ${app.kind === "cask" ? "Cask" : "Formül"}`
+        : "Yerel · AppImage";
   const tags = [];
+  tags.push(`<span class="tag tag-source ${sourceMeta.tagClass}">${sourceMeta.label}</span>`);
+  if (app.scope) {
+    const scope = scopeLabel(app.scope);
+    if (scope) tags.push(`<span class="tag tag-scope">${escapeHtml(scope)}</span>`);
+  }
+  if (app.classic) tags.push('<span class="tag tag-scope">Klasik kısıtlama</span>');
+  if (source === "homebrew" && app.kind === "cask") tags.push('<span class="tag tag-scope">Cask</span>');
   if (app.installed) tags.push('<span class="tag">Yüklü</span>');
   if (app.updateAvailable) tags.push('<span class="tag tag-update">Güncelleme</span>');
   for (const slug of categories) {
@@ -1841,11 +2177,35 @@ function renderDetail() {
     : "";
 
   const description = sanitizeDescription(detail.description);
+  const developer = app.developer
+    || (source === "flatpak" ? "Flathub topluluğu" : source === "snap" ? "Snap Store" : source === "homebrew" ? "Homebrew" : "Yerel AppImage");
+  const sizeNote = detail.downloadSize
+    ? `İndirme: ${formatBytes(detail.downloadSize)}`
+    : source === "appimage"
+      ? "Yerel dosya"
+      : source === "snap"
+        ? "Snap Store’dan kurulur"
+        : source === "homebrew"
+          ? "Homebrew ile kurulur"
+          : "Flathub’dan kurulur";
+  const footnote = source === "flatpak"
+    ? "Açıklama, ekran görüntüleri ve sürüm bilgileri Flathub’dan; topluluk puanları ve yorumları ODRS’den alınır. Kurulum ve kaldırma işlemleri Flatpak ile yapılır."
+    : source === "snap"
+      ? "Açıklama ve görseller Snap Store’dan alınır. Kurulum, güncelleme ve kaldırma işlemleri sistem genelinde Snap ile yapılır."
+      : source === "homebrew"
+        ? "Formül bilgileri Homebrew API’sinden alınır. Kurulum, güncelleme ve kaldırma işlemleri kullanıcı kapsamında Homebrew ile yapılır."
+        : "Bu uygulama yerel bir AppImage dosyasıdır. Dosya Macro Store veri dizininde saklanır; güncellemek için yeni sürümü yeniden içe aktarın.";
+  const reviewsSection = source === "flatpak" || reviews.length
+    ? `<section class="detail-section">
+          <h2>Topluluk yorumları <span class="source-note">ODRS üzerinden</span></h2>
+          ${reviewsHtml(reviews)}
+        </section>`
+    : "";
 
   els.detailView.innerHTML = `
     <div class="detail-top">
       <button class="text-back" type="button" data-back>${ICON.arrow}Geri</button>
-      <span class="detail-source">Flathub · Flatpak</span>
+      <span class="detail-source">${escapeHtml(detailSource)}</span>
     </div>
 
     <section class="detail-hero">
@@ -1855,12 +2215,12 @@ function renderDetail() {
           <h1>${escapeHtml(app.name || app.id)}</h1>
           ${detail.verified ? `<span class="verified-badge">${ICON.check}Doğrulanmış</span>` : ""}
         </div>
-        <p class="detail-dev">${escapeHtml(app.developer || "Flathub topluluğu")}</p>
+        <p class="detail-dev">${escapeHtml(developer)}</p>
         ${app.summary ? `<p class="detail-summary">${escapeHtml(app.summary)}</p>` : ""}
         ${tags.length ? `<div class="detail-tags">${tags.join("")}</div>` : ""}
         <div class="detail-actions">
           ${detailActionButtons(app)}
-          <span class="detail-size">${detail.downloadSize ? `İndirme: ${formatBytes(detail.downloadSize)}` : "Flathub’dan kurulur"}</span>
+          <span class="detail-size">${escapeHtml(sizeNote)}</span>
         </div>
       </div>
     </section>
@@ -1872,10 +2232,7 @@ function renderDetail() {
           <h2>Açıklama</h2>
           ${description ? `<div class="prose">${description}</div>` : '<p class="prose">Açıklama sağlanmamış.</p>'}
         </section>
-        <section class="detail-section">
-          <h2>Topluluk yorumları <span class="source-note">ODRS üzerinden</span></h2>
-          ${reviewsHtml(reviews)}
-        </section>
+        ${reviewsSection}
       </div>
       <aside class="detail-side">
         ${ratingCardHtml(detail.rating)}
@@ -1883,11 +2240,15 @@ function renderDetail() {
       </aside>
     </div>
 
-    <p class="detail-footnote">Açıklama, ekran görüntüleri ve sürüm bilgileri Flathub’dan; topluluk puanları ve yorumları ODRS’den alınır. Kurulum ve kaldırma işlemleri kullanıcı kapsamında Flatpak ile yapılır.</p>`;
+    <p class="detail-footnote">${escapeHtml(footnote)}</p>`;
 }
 
 function renderSettings() {
   const theme = currentTheme();
+  const accent = currentAccent();
+  const lowPower = lowPowerEnabled();
+  const info = state.storeInfo || {};
+  const setup = state.setup.status;
   let repoBody;
 
   if (state.remotesLoading && !state.remotes.length) {
@@ -1916,35 +2277,64 @@ function renderSettings() {
       </div>`).join("")}</div>`;
   }
 
-  const flatpakVersion = state.storeInfo?.flatpakVersion || "bulunamadı";
-  const setup = state.setup.status;
-  const flatpakReady = setup ? Boolean(setup.flatpakAvailable) : Boolean(state.storeInfo?.flatpakAvailable);
-  const flathubReady = setup ? Boolean(setup.userFlathubAvailable) : Boolean(state.storeInfo?.userFlathubAvailable);
+  const flatpakReady = setup ? Boolean(setup.flatpakAvailable) : Boolean(info.flatpakAvailable);
+  const flathubReady = setup ? Boolean(setup.userFlathubAvailable) : Boolean(info.userFlathubAvailable);
+  const snapReady = setup ? Boolean(setup.snapAvailable) : Boolean(info.snapAvailable);
+  const brewReady = setup ? Boolean(setup.brewAvailable) : Boolean(info.brewAvailable);
   const flatpakDetail = flatpakReady
-    ? (setup?.flatpakVersion || state.storeInfo?.flatpakVersion || "Kurulu")
+    ? (setup?.flatpakVersion || info.flatpakVersion || "Kurulu")
     : "Kurulu değil";
   const flathubDetail = flathubReady
     ? "Kullanıcı deposu hazır"
     : setup?.flathubAvailable
       ? "Sistem deposu var · kullanıcı deposu eksik"
       : "Eklenmeli";
+  const snapDetail = snapReady
+    ? (setup?.snapVersion || info.snapVersion || "Kurulu")
+    : "Kurulu değil";
+  const brewDetail = brewReady
+    ? (setup?.brewVersion || info.brewVersion || "Kurulu")
+    : "Kurulu değil";
+  const appimageCount = Math.max(
+    state.installed.filter(app => appSource(app) === "appimage").length,
+    Number(info.appimageCount) || 0,
+  );
+  const snapSupported = setup ? Boolean(setup.snapInstallSupported) : false;
+  const brewSupported = setup ? Boolean(setup.brewInstallSupported) : false;
+
+  const sourceCard = (source, { ready, detail = "", desc, action = "" }) => `
+    <div class="source-card">
+      <span class="repo-mark" aria-hidden="true">${ICON.box}</span>
+      <div class="source-card-body">
+        <h3>${SOURCES[source].label}</h3>
+        <p>${escapeHtml(desc)}</p>
+      </div>
+      ${ready
+        ? `<span class="source-state is-ok">${escapeHtml(detail)}</span>`
+        : action}
+    </div>`;
+
+  const snapAction = snapSupported
+    ? '<button class="btn btn-ghost btn-sm" type="button" data-install-source="snap">Kur</button>'
+    : '<button class="btn btn-ghost btn-sm" type="button" data-open-setup>Kurulum</button>';
+  const brewAction = brewSupported
+    ? '<button class="btn btn-ghost btn-sm" type="button" data-install-source="homebrew">Kur</button>'
+    : '<button class="btn btn-ghost btn-sm" type="button" data-open-setup>Kurulum</button>';
 
   els.settingsView.innerHTML = `
     <header class="view-head">
       <div class="view-title">
         <p class="eyebrow">Macro Store</p>
         <h1>Seçenekler</h1>
-        <p class="view-sub">Görünümü ve uygulama kaynaklarını yönetin.</p>
+        <p class="view-sub">Görünümü, performansı ve uygulama kaynaklarını yönetin.</p>
       </div>
-      <p class="view-note">Sürüm 0.3.0</p>
+      <p class="view-note">Sürüm ${APP_VERSION}</p>
     </header>
-
-    ${storeNoticeHtml()}
 
     <section class="settings-section">
       <div class="settings-head">
         <h2>Görünüm</h2>
-        <p>Göz yormayan açık tonlar ya da koyu mağaza görünümü arasında geçiş yapın.</p>
+        <p>Açık ya da koyu tema seçin; vurgu rengini mağaza genelinde değiştirin.</p>
       </div>
       <div class="theme-grid">
         <button class="theme-card${theme === "light" ? " is-active" : ""}" type="button" data-theme-choice="light" aria-pressed="${theme === "light"}">
@@ -1956,33 +2346,66 @@ function renderSettings() {
           <span class="theme-label"><strong>Koyu tema</strong><span>Düşük ışıkta rahat kullanım</span></span>
         </button>
       </div>
+      <div class="accent-row">
+        <span class="accent-label">Vurgu rengi</span>
+        ${ACCENTS.map(item => `<button class="accent-dot${accent === item.id ? " is-active" : ""}" type="button" data-accent-choice="${item.id}" aria-pressed="${accent === item.id}" title="${item.label}" aria-label="${item.label} vurgu rengi"></button>`).join("")}
+      </div>
     </section>
 
     <section class="settings-section">
       <div class="settings-head">
-        <h2>Sistem hazırlığı</h2>
-        <p>Macro Store uygulamaları kullanıcı kapsamında Flatpak ile kurar. Gerekli bileşenleri buradan denetleyin.</p>
+        <h2>Performans</h2>
+        <p>Düşük güç modu animasyonları, gölgeleri ve bulanıklığı azaltarak kaynak tüketimini düşürür.</p>
       </div>
-      <div class="system-status">
-        <div class="system-row">
-          <span class="status-dot ${flatpakReady ? "is-ok" : "is-error"}" aria-hidden="true"></span>
-          <span>Flatpak</span>
-          <strong>${escapeHtml(flatpakDetail)}</strong>
+      <div class="toggle-row">
+        <div class="toggle-text">
+          <h3>Düşük güç modu</h3>
+          <p>Her sistemde çalışır. Etkinleştirildiğinde geçişler anında tamamlanır ve görsel efektler sadeleşir.</p>
         </div>
-        <div class="system-row">
-          <span class="status-dot ${flathubReady ? "is-ok" : "is-error"}" aria-hidden="true"></span>
-          <span>Flathub</span>
-          <strong>${escapeHtml(flathubDetail)}</strong>
-        </div>
+        <button class="switch" type="button" role="switch" aria-checked="${lowPower}" data-low-power-toggle aria-label="Düşük güç modu"></button>
+      </div>
+    </section>
+
+    <section class="settings-section">
+      <div class="settings-head">
+        <h2>Kaynaklar</h2>
+        <p>Flatpak ana kaynaktır. Snap, Homebrew ve AppImage desteği isteğe bağlıdır; kurulu kaynaklar mağazada birlikte listelenir.</p>
+      </div>
+      <div class="source-grid">
+        ${sourceCard("flatpak", {
+          ready: flatpakReady,
+          detail: flatpakDetail,
+          desc: flathubReady ? "Flathub kullanıcı deposu hazır" : "Flathub kullanıcı deposu eklenmeli",
+          action: '<button class="btn btn-ghost btn-sm" type="button" data-open-setup>Kurulum</button>',
+        })}
+        ${sourceCard("snap", {
+          ready: snapReady,
+          detail: snapDetail,
+          desc: "Snap Store uygulamaları sistem genelinde kurulur",
+          action: snapAction,
+        })}
+        ${sourceCard("homebrew", {
+          ready: brewReady,
+          detail: brewDetail,
+          desc: "Formüller ve casks kullanıcı kapsamında kurulur",
+          action: brewAction,
+        })}
+        ${sourceCard("appimage", {
+          ready: false,
+          desc: appimageCount > 0 ? `${appimageCount} AppImage içe aktarıldı` : "Dışarıdan edinilen .AppImage dosyalarını içe aktarın",
+          action: '<button class="btn btn-ghost btn-sm" type="button" data-appimage-open>Ekle</button>',
+        })}
+      </div>
+      <div class="section-actions">
+        <button class="btn btn-ghost" type="button" data-open-setup>Kurulum sihirbazını aç</button>
       </div>
       ${setup?.distroName ? `<p class="system-meta">${escapeHtml(setup.distroName)}${setup.packageManagerLabel ? ` · ${escapeHtml(setup.packageManagerLabel)}` : ""}</p>` : ""}
-      <button class="btn btn-ghost" type="button" data-open-setup>${flatpakReady && flathubReady ? "Kurulum bilgilerini aç" : "Kurulum sihirbazını aç"}</button>
     </section>
 
     <section class="settings-section">
       <div class="settings-head">
         <h2>Depolar</h2>
-        <p>Flathub varsayılan kaynaktır. Kullanıcı kapsamına özel Flatpak depoları ekleyebilirsiniz.</p>
+        <p>Flatpak depoları. Flathub varsayılan kaynaktır; kullanıcı kapsamına özel depolar ekleyebilirsiniz.</p>
       </div>
       ${repoBody}
       <form id="repoForm" class="repo-form" autocomplete="off">
@@ -1994,27 +2417,12 @@ function renderSettings() {
 
     <section class="settings-section">
       <div class="settings-head">
-        <h2>Diğer kaynaklar</h2>
-        <p>Macro Store şimdilik yalnızca Flathub ekosistemine odaklanır.</p>
-      </div>
-      <div class="disabled-source">
-        <span class="repo-mark" aria-hidden="true">${ICON.box}</span>
-        <div class="repo-body">
-          <div class="repo-title"><strong>Homebrew</strong><span class="repo-badge">Yakında</span></div>
-          <p class="repo-url">Homebrew formülleri ve casks desteği ileride eklenecek.</p>
-        </div>
-        <span class="soon-badge">Devre dışı</span>
-      </div>
-    </section>
-
-    <section class="settings-section">
-      <div class="settings-head">
         <h2>Mağaza bilgileri</h2>
       </div>
       <div class="about-lines">
-        <div><strong>Macro Store</strong> 0.3.0 · Flathub tabanlı Linux yazılım mağazası</div>
-        <div>Flatpak: <strong>${escapeHtml(flatpakVersion)}</strong> · Kullanıcı kapsamı</div>
-        <div>Uygulama verileri Flathub API’sinden, topluluk yorumları ODRS’den alınır.</div>
+        <div><strong>Macro Store</strong> ${APP_VERSION} · GPLv3 · Linux uygulama mağazası</div>
+        <div>Flatpak: <strong>${escapeHtml(flatpakDetail)}</strong> · Snap: <strong>${escapeHtml(snapDetail)}</strong> · Homebrew: <strong>${escapeHtml(brewDetail)}</strong></div>
+        <div>Uygulama verileri Flathub, Snap Store ve Homebrew API’lerinden; topluluk yorumları ODRS’den alınır.</div>
       </div>
     </section>`;
 }
@@ -2041,6 +2449,8 @@ function applyAction(action, id) {
     state.discover?.picks || [],
     state.discover?.popular || [],
     state.discover?.recent || [],
+    state.sourceDiscover.snap.apps,
+    state.sourceDiscover.homebrew.apps,
   ];
   for (const list of lists) list.forEach(app => patchApp(app, action, id));
   if (state.discover?.appOfDay) patchApp(state.discover.appOfDay, action, id);
@@ -2050,10 +2460,7 @@ function applyAction(action, id) {
     state.installed = state.installed.filter(app => app.id !== id);
   }
   if (action === "install") {
-    const source = state.searchResults.find(app => app.id === id)
-      || state.detail?.app
-      || state.discover?.appOfDay
-      || state.discover?.picks?.find(app => app.id === id);
+    const source = findAppById(id);
     if (source && state.installedLoaded && !state.installed.some(app => app.id === id)) {
       state.installed.push({ ...source, installed: true, updateAvailable: false });
       state.installed.sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "tr", { sensitivity: "base" }));
@@ -2063,6 +2470,7 @@ function applyAction(action, id) {
 
 async function performAction(action, app) {
   if (!app || state.busy || !ACTIONS[action]) return;
+  if (action === "launch") return performLaunch(app);
   state.busy = { id: app.id, action, name: app.name || app.id };
   showActivity(`${app.name || app.id} ${ACTIONS[action].verb}…`);
   renderRoute();
@@ -2082,13 +2490,45 @@ async function performAction(action, app) {
     hideActivity(900);
     renderRoute();
     loadInstalled(true, true);
+    if (action === "install" || action === "remove") loadStoreInfo();
+  }
+}
+
+async function performLaunch(app) {
+  if (!app || state.busy) return;
+  if (appSource(app) !== "appimage") {
+    toast("Bu uygulama mağaza üzerinden başlatılamıyor.", "error");
+    return;
+  }
+  state.busy = { id: app.id, action: "launch", name: app.name || app.id };
+  showActivity(`${app.name || app.id} açılıyor…`);
+  renderRoute();
+
+  try {
+    await invoke("launch_appimage_file", { id: app.id });
+    toast(`${app.name || "AppImage"} başlatıldı.`, "success");
+  } catch (err) {
+    toast(errText(err), "error");
+  } finally {
+    state.busy = null;
+    hideActivity(600);
+    renderRoute();
   }
 }
 
 function askRemove(app) {
+  const source = appSource(app);
+  const name = app.name || app.id;
+  const text = source === "appimage"
+    ? `${name} mağaza kayıtlarından ve uygulama menüsünden kaldırılacak. İçe aktarılan dosya silinir. Bu işlem geri alınamaz.`
+    : source === "snap"
+      ? `${name} sistem genelindeki Snap kurulumundan kaldırılacak. Bu işlem geri alınamaz.`
+      : source === "homebrew"
+        ? `${name} Homebrew kullanıcı kurulumundan kaldırılacak. Bu işlem geri alınamaz.`
+        : `${name} ${app.scope === "system" ? "sistem" : "kullanıcı"} Flatpak kurulumundan kaldırılacak. Bu işlem geri alınamaz.`;
   askConfirm({
     title: "Uygulamayı kaldır",
-    text: `${app.name || app.id} kullanıcı kurulumundan kaldırılacak. Bu işlem geri alınamaz.`,
+    text,
     label: "Kaldır",
     onConfirm: () => performAction("remove", app),
   });
@@ -2207,6 +2647,84 @@ function openLogModal() {
   renderLog();
   openModal(els.logModal);
   requestAnimationFrame(scrollLogToEnd);
+}
+
+/* ── AppImage içe aktarma ─────────────────────────── */
+
+function setAppImageError(message) {
+  if (!els.appimageError) return;
+  els.appimageError.textContent = message || "";
+  els.appimageError.hidden = !message;
+}
+
+function openAppImageModal() {
+  setAppImageError("");
+  if (els.appimagePath) els.appimagePath.value = "";
+  if (els.appimageName) els.appimageName.value = "";
+  openModal(els.appimageModal);
+  requestAnimationFrame(() => els.appimagePath?.focus());
+}
+
+async function pickAppImage() {
+  if (state.appimage.picking) return;
+  state.appimage.picking = true;
+  if (els.appimagePick) els.appimagePick.disabled = true;
+  try {
+    const path = await invoke("pick_appimage_file");
+    if (path) {
+      els.appimagePath.value = path;
+      const base = String(path).split(/[\\/]/).pop().replace(/\.appimage$/i, "");
+      if (els.appimageName && !els.appimageName.value.trim()) els.appimageName.value = base;
+      setAppImageError("");
+    }
+  } catch (err) {
+    setAppImageError(errText(err));
+  } finally {
+    state.appimage.picking = false;
+    if (els.appimagePick) els.appimagePick.disabled = false;
+  }
+}
+
+async function importAppImage() {
+  if (state.appimage.importing) return;
+  const path = String(els.appimagePath?.value || "").trim();
+  const name = String(els.appimageName?.value || "").trim();
+  if (!path) {
+    setAppImageError("Bir AppImage dosyası seçin.");
+    els.appimagePath?.focus();
+    return;
+  }
+
+  state.appimage.importing = true;
+  setAppImageError("");
+  const button = els.appimageImport;
+  if (button) {
+    button.disabled = true;
+    button.innerHTML = '<span class="spinner"></span>İçe aktarılıyor…';
+  }
+  showActivity("AppImage içe aktarılıyor…");
+
+  try {
+    const app = await invoke("import_appimage_file", { path, name: name || null });
+    toast(`${app?.name || "AppImage"} içe aktarıldı.`, "success");
+    closeModal(els.appimageModal);
+    state.installedLoaded = false;
+    await loadInstalled(true);
+    await loadStoreInfo();
+    if (app?.id && state.detail?.app?.id === app.id) loadDetail(app.id, true);
+    if (state.route.name === "installed") renderInstalled();
+  } catch (err) {
+    const message = errText(err);
+    setAppImageError(message);
+    toast(message, "error");
+  } finally {
+    state.appimage.importing = false;
+    hideActivity(700);
+    if (button) {
+      button.disabled = false;
+      button.textContent = "İçe aktar";
+    }
+  }
 }
 
 /* ── Modallar ve görsel görüntüleyici ─────────────── */
@@ -2411,17 +2929,10 @@ function bindEvents() {
       const id = actionButton.dataset.id;
       const action = actionButton.dataset.action;
       if (!id || !ACTIONS[action]) return;
-      const app = state.detail?.app?.id === id
-        ? state.detail.app
-        : state.installed.find(item => item.id === id)
-          || state.searchResults.find(item => item.id === id)
-          || state.discover?.appOfDay?.id === id && state.discover.appOfDay
-          || state.discover?.picks?.find(item => item.id === id)
-          || state.discover?.popular?.find(item => item.id === id)
-          || state.discover?.recent?.find(item => item.id === id)
-          || state.category?.apps?.find(item => item.id === id);
+      const app = findAppById(id);
       if (!app) return;
       if (action === "remove") askRemove(app);
+      else if (action === "launch") performLaunch(app);
       else performAction(action, app);
       return;
     }
@@ -2432,6 +2943,60 @@ function bindEvents() {
       setTheme(theme);
       if (state.route.name === "settings") renderSettings();
       toast(theme === "light" ? "Açık tema etkin." : "Koyu tema etkin.", "info");
+      return;
+    }
+
+    const accentChoice = target.closest("[data-accent-choice]");
+    if (accentChoice) {
+      setAccent(accentChoice.dataset.accentChoice);
+      if (state.route.name === "settings") renderSettings();
+      toast("Vurgu rengi güncellendi.", "info");
+      return;
+    }
+
+    const lowPowerToggle = target.closest("[data-low-power-toggle]");
+    if (lowPowerToggle) {
+      const next = !lowPowerEnabled();
+      setLowPower(next);
+      if (state.route.name === "settings") renderSettings();
+      toast(next ? "Düşük güç modu etkin." : "Düşük güç modu kapatıldı.", "info");
+      return;
+    }
+
+    const sourceFilter = target.closest("[data-source-filter]");
+    if (sourceFilter) {
+      state.sourceFilter = sourceFilter.dataset.sourceFilter || "all";
+      renderInstalled();
+      return;
+    }
+
+    const appimageOpen = target.closest("[data-appimage-open]");
+    if (appimageOpen) {
+      openAppImageModal();
+      return;
+    }
+
+    const appimagePick = target.closest("[data-appimage-pick]");
+    if (appimagePick) {
+      pickAppImage();
+      return;
+    }
+
+    const appimageImport = target.closest("[data-appimage-import]");
+    if (appimageImport) {
+      importAppImage();
+      return;
+    }
+
+    const sourceInstall = target.closest("[data-install-source]");
+    if (sourceInstall) {
+      installSource(sourceInstall.dataset.installSource);
+      return;
+    }
+
+    const sourceRetry = target.closest("[data-source-retry]");
+    if (sourceRetry) {
+      loadSourceDiscover(sourceRetry.dataset.sourceRetry, true);
       return;
     }
 
@@ -2633,6 +3198,10 @@ function bindEvents() {
 async function init() {
   bindEvents();
   setTheme(currentTheme());
+  setAccent(currentAccent());
+  try {
+    if (localStorage.getItem("macro-low-power") === "1") setLowPower(true);
+  } catch { /* yoksay */ }
 
   try {
     await listen("app-log", event => appendLog(event.payload));
@@ -2674,6 +3243,94 @@ const MOCK_FALLBACK_APPS = [
   { id: "org.gnome.Calculator", name: "Hesap Makinesi", developer: "GNOME", summary: "Basit ve gelişmiş hesaplamalar.", category: "utility" },
 ];
 
+const MOCK_SNAP_APPS = [
+  { name: "firefox", title: "Firefox", publisher: "Mozilla", version: "141.0.2", summary: "Hızlı, gizli ve güvenli web tarayıcısı.", icon: "https://dl.flathub.org/media/icons/128x128/org.mozilla.firefox.png", classic: false },
+  { name: "code", title: "Visual Studio Code", publisher: "Microsoft", version: "1.104.0", summary: "Kod düzenleme, hata ayıklama ve Git desteği.", icon: "https://dl.flathub.org/media/icons/128x128/com.visualstudio.code.png", classic: true },
+  { name: "vlc", title: "VLC", publisher: "VideoLAN", version: "3.0.21", summary: "Çoklu ortam dosyalarını oynatın ve yayınlayın.", icon: "https://dl.flathub.org/media/icons/128x128/org.videolan.VLC.png", classic: false },
+  { name: "spotify", title: "Spotify", publisher: "Spotify AB", version: "1.2.63", summary: "Müzik ve podcast dinleme uygulaması.", icon: "https://dl.flathub.org/media/icons/128x128/com.spotify.Client.png", classic: false },
+  { name: "obsidian", title: "Obsidian", publisher: "Obsidian", version: "1.9.12", summary: "Yerel Markdown notları ve bilgi tabanı.", icon: "https://dl.flathub.org/media/icons/128x128/md.obsidian.Obsidian.png", classic: false },
+  { name: "telegram-desktop", title: "Telegram", publisher: "Telegram FZ-LLC", version: "6.2.0", summary: "Hızlı ve güvenli mesajlaşma.", icon: "https://dl.flathub.org/media/icons/128x128/org.telegram.desktop.png", classic: false },
+];
+
+const MOCK_BREW_APPS = [
+  { token: "wget", version: "1.25.0", summary: "İnternetten dosya indirme aracı", kind: "formula" },
+  { token: "htop", version: "3.4.1", summary: "Etkileşimli süreç görüntüleyici", kind: "formula" },
+  { token: "neovim", version: "0.11.4", summary: "Modern Vim tabanlı metin düzenleyici", kind: "formula" },
+  { token: "ripgrep", version: "14.1.1", summary: "Hızlı metin arama aracı", kind: "formula" },
+  { token: "jq", version: "1.8.1", summary: "JSON işleme ve sorgulama aracı", kind: "formula" },
+  { token: "visual-studio-code", version: "1.104.0", summary: "Kod düzenleyici", kind: "cask" },
+];
+
+function mockSnapItem(app) {
+  const id = `snap:${app.name}`;
+  return {
+    id,
+    name: app.title || app.name,
+    summary: app.summary || "",
+    developer: app.publisher || "Snap Store",
+    version: app.version || "",
+    icon: app.icon || null,
+    installed: MOCK.installed.has(id),
+    updateAvailable: MOCK.updates.has(id),
+    category: null,
+    monthlyInstalls: null,
+    heroImage: null,
+    source: "snap",
+    scope: "system",
+    kind: null,
+    classic: Boolean(app.classic),
+  };
+}
+
+function mockBrewItem(app) {
+  const id = `homebrew:${app.token}`;
+  return {
+    id,
+    name: app.token,
+    summary: app.summary || "",
+    developer: "Homebrew",
+    version: app.version || "",
+    icon: null,
+    installed: MOCK.installed.has(id),
+    updateAvailable: MOCK.updates.has(id),
+    category: null,
+    monthlyInstalls: null,
+    heroImage: null,
+    source: "homebrew",
+    scope: "user",
+    kind: app.kind || "formula",
+    classic: false,
+  };
+}
+
+function mockAppImageItem(entry) {
+  return {
+    id: entry.id,
+    name: entry.name,
+    summary: "Macro Store üzerinden içe aktarılan AppImage",
+    developer: "Yerel AppImage",
+    version: "Yerel",
+    icon: null,
+    installed: MOCK.installed.has(entry.id),
+    updateAvailable: false,
+    category: null,
+    monthlyInstalls: null,
+    heroImage: null,
+    source: "appimage",
+    scope: "user",
+    kind: null,
+    classic: false,
+  };
+}
+
+function mockAppImageSlug(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64) || "appimage";
+}
+
 function mockLoad(key, fallback) {
   try {
     const raw = localStorage.getItem(key);
@@ -2689,9 +3346,15 @@ function mockSave(key, value) {
 }
 
 const MOCK = {
-  installed: new Set(mockLoad("macro-mock-installed", ["org.mozilla.firefox", "org.videolan.VLC"])),
-  updates: new Set(mockLoad("macro-mock-updates", ["org.videolan.VLC"])),
-  setup: mockLoad("macro-mock-setup", { flatpak: true, flathub: true }),
+  installed: new Set(mockLoad("macro-mock-installed", [
+    "org.mozilla.firefox",
+    "org.videolan.VLC",
+    "snap:spotify",
+    "homebrew:htop",
+  ])),
+  updates: new Set(mockLoad("macro-mock-updates", ["org.videolan.VLC", "homebrew:htop"])),
+  setup: mockLoad("macro-mock-setup", { flatpak: true, flathub: true, snap: true, brew: true }),
+  appimages: mockLoad("macro-mock-appimages", []),
   remotes: mockLoad("macro-mock-remotes", [
     { name: "flathub", title: "Flathub", url: "https://dl.flathub.org/repo/", scope: "user", comment: "Flathub uygulama deposu", icon: "https://dl.flathub.org/repo/logo.svg", deletable: false },
     { name: "flathub", title: "Flathub", url: "https://dl.flathub.org/repo/", scope: "system", comment: "Flathub uygulama deposu", icon: "https://dl.flathub.org/repo/logo.svg", deletable: false },
@@ -2700,9 +3363,12 @@ const MOCK = {
 };
 
 if (!Array.isArray(MOCK.remotes)) MOCK.remotes = [];
+if (!Array.isArray(MOCK.appimages)) MOCK.appimages = [];
 if (!MOCK.setup || typeof MOCK.setup !== "object") {
-  MOCK.setup = { flatpak: true, flathub: true };
+  MOCK.setup = { flatpak: true, flathub: true, snap: true, brew: true };
 }
+if (MOCK.setup.snap === undefined) MOCK.setup.snap = true;
+if (MOCK.setup.brew === undefined) MOCK.setup.brew = true;
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -2742,6 +3408,10 @@ function mockFallback(id) {
     category: base.category,
     monthlyInstalls: null,
     heroImage: null,
+    source: "flatpak",
+    scope: "user",
+    kind: null,
+    classic: false,
   };
 }
 
@@ -2792,6 +3462,10 @@ function mockAppFromAppstream(appstream) {
     category: mockCategoryFromAppstream(categories),
     monthlyInstalls: null,
     heroImage: screenshots[0]?.url || null,
+    source: "flatpak",
+    scope: "user",
+    kind: null,
+    classic: false,
   };
 }
 
@@ -2817,6 +3491,10 @@ function mockApiApp(hit) {
     category: normalizeCategory(hit.main_categories) || mockCategoryFromAppstream(hit.categories),
     monthlyInstalls: hit.installs_last_month || null,
     heroImage: hit.hero_image || null,
+    source: "flatpak",
+    scope: "user",
+    kind: null,
+    classic: false,
   };
 }
 
@@ -2854,19 +3532,77 @@ async function mockSearch(query) {
   if (String(query || "").trim().length < 2) {
     throw new Error("Arama için en az 2 karakter yazın.");
   }
+  const needle = String(query).toLocaleLowerCase("tr");
+  const extras = [
+    ...MOCK_SNAP_APPS.map(mockSnapItem),
+    ...MOCK_BREW_APPS.map(mockBrewItem),
+  ].filter(app => `${app.name} ${app.summary} ${app.id}`.toLocaleLowerCase("tr").includes(needle));
+
+  let flatpak = [];
   try {
     const data = await mockFetchJson(`${FLATHUB}/search?locale=tr`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query, hits_per_page: 36, page: 1 }),
     });
-    return (data.hits || []).map(mockApiApp);
+    flatpak = (data.hits || []).map(mockApiApp);
   } catch {
-    const needle = String(query).toLocaleLowerCase("tr");
-    return mockFallbackList().filter(app =>
+    flatpak = mockFallbackList().filter(app =>
       `${app.name} ${app.summary} ${app.id}`.toLocaleLowerCase("tr").includes(needle),
     );
   }
+  const seen = new Set(flatpak.map(app => app.id));
+  return [...flatpak, ...extras.filter(app => !seen.has(app.id))];
+}
+
+function mockSourceItem(id) {
+  const source = id.includes(":") ? id.split(":")[0] : "";
+  const native = id.includes(":") ? id.split(":").slice(1).join(":") : id;
+  if (source === "snap") {
+    const app = MOCK_SNAP_APPS.find(item => item.name === native);
+    return app ? mockSnapItem(app) : null;
+  }
+  if (source === "homebrew") {
+    const app = MOCK_BREW_APPS.find(item => item.token === native);
+    return app ? mockBrewItem(app) : null;
+  }
+  if (source === "appimage") {
+    const entry = MOCK.appimages.find(item => item.id === id);
+    return entry ? mockAppImageItem(entry) : null;
+  }
+  return null;
+}
+
+function mockSourceDiscover(source) {
+  if (source === "snap") return MOCK_SNAP_APPS.slice(0, 4).map(mockSnapItem);
+  if (source === "homebrew") return MOCK_BREW_APPS.slice(0, 5).map(mockBrewItem);
+  if (source === "appimage") return MOCK.appimages.map(mockAppImageItem);
+  return [];
+}
+
+function mockSourceDetail(id) {
+  const app = mockSourceItem(id);
+  if (!app) throw new Error("Uygulama bulunamadı.");
+  const source = appSource(app);
+  const description = source === "snap"
+    ? `${app.name}, Snap Store üzerinden sistem genelinde kurulur. Snap paketleri kendi çalışma zamanlarını taşır ve otomatik güncellenir.`
+    : source === "homebrew"
+      ? `${app.name}, Homebrew ${app.kind === "cask" ? "cask" : "formülü"} olarak kullanıcı kapsamında kurulur. Paket bilgileri Homebrew API’sinden alınır.`
+      : "Bu uygulama yerel bir AppImage dosyasıdır. Dosya Macro Store veri dizininde saklanır ve uygulama menüsüne eklenir.";
+  return {
+    app,
+    description,
+    screenshots: [],
+    categories: [],
+    license: source === "snap" ? "Snap Store" : source === "homebrew" ? "Homebrew" : "Yerel dosya",
+    verified: false,
+    homepage: null,
+    downloadSize: null,
+    installedSize: null,
+    installsLastMonth: null,
+    rating: null,
+    reviews: [],
+  };
 }
 
 async function mockCategory(slug, page = 1) {
@@ -2991,10 +3727,15 @@ async function mockDetail(id) {
 }
 
 async function mockInstalledApps() {
-  const apps = await Promise.all([...MOCK.installed].map(id =>
+  const flatpakIds = [...MOCK.installed].filter(id => !id.includes(":"));
+  const flatpak = await Promise.all(flatpakIds.map(id =>
     mockAppstream(id).then(entry => entry.app).catch(() => mockFallback(id)),
   ));
-  return apps
+  const extras = [...MOCK.installed]
+    .filter(id => id.includes(":"))
+    .map(mockSourceItem)
+    .filter(Boolean);
+  return [...flatpak, ...extras]
     .map(app => ({
       ...app,
       installed: true,
@@ -3041,22 +3782,40 @@ function mockRemoveRemote(name) {
 async function mockOperation(action, id) {
   if (!ACTIONS[action]) throw new Error("Bilinmeyen işlem.");
   if (action !== "install" && !MOCK.installed.has(id)) {
-    throw new Error("Bu Flatpak uygulaması kullanıcı kurulumunda yüklü değil.");
+    throw new Error("Bu uygulama yüklü değil.");
   }
 
+  const source = id.includes(":") ? id.split(":")[0] : "flatpak";
+  const native = id.includes(":") ? id.slice(source.length + 1) : id;
+  const manager = source === "snap"
+    ? "Snap"
+    : source === "homebrew"
+      ? "Homebrew"
+      : source === "appimage"
+        ? "AppImage"
+        : "Flatpak";
   const cached = MOCK.appCache.get(id)?.app;
-  const name = cached?.name || MOCK_FALLBACK_APPS.find(app => app.id === id)?.name || id;
-  const command = action === "install"
-    ? `flatpak install --user -y flathub ${id}`
-    : action === "remove"
-      ? `flatpak uninstall --user -y ${id}`
-      : `flatpak update --user -y ${id}`;
+  const name = mockSourceItem(id)?.name
+    || cached?.name
+    || MOCK_FALLBACK_APPS.find(app => app.id === id)?.name
+    || id;
+  const command = source === "snap"
+    ? `pkexec snap ${action === "update" ? "refresh" : action} ${native}`
+    : source === "homebrew"
+      ? `brew ${action === "update" ? "upgrade" : action} ${native}`
+      : source === "appimage"
+        ? `rm ${MOCK.appimages.find(entry => entry.id === id)?.path || native}`
+        : action === "install"
+          ? `flatpak install --user -y flathub ${native}`
+          : action === "remove"
+            ? `flatpak uninstall --user -y ${native}`
+            : `flatpak update --user -y ${native}`;
 
   emitMock("app-log", { line: `Komut: ${command}`, kind: "cmd" });
   await sleep(260);
-  emitMock("app-log", { line: action === "install" ? "Flathub deposu denetleniyor…" : "Flatpak işlemi hazırlanıyor…", kind: "info" });
+  emitMock("app-log", { line: `${manager} işlemi hazırlanıyor…`, kind: "info" });
   await sleep(380);
-  emitMock("app-log", { line: action === "remove" ? "Uygulama kaldırılıyor…" : "Uygulama indiriliyor…", kind: "stdout" });
+  emitMock("app-log", { line: action === "remove" ? "Uygulama kaldırılıyor…" : action === "update" ? "Güncelleme indiriliyor…" : "Uygulama indiriliyor…", kind: "stdout" });
   await sleep(520);
 
   if (action === "install") {
@@ -3065,6 +3824,10 @@ async function mockOperation(action, id) {
   } else if (action === "remove") {
     MOCK.installed.delete(id);
     MOCK.updates.delete(id);
+    if (source === "appimage") {
+      MOCK.appimages = MOCK.appimages.filter(entry => entry.id !== id);
+      mockSave("macro-mock-appimages", MOCK.appimages);
+    }
   } else {
     MOCK.updates.delete(id);
   }
@@ -3079,7 +3842,7 @@ async function mockOperation(action, id) {
     message,
     appId: id,
     action,
-    manager: "Flatpak",
+    manager,
   };
   emitMock("app-finished", outcome);
   return outcome;
@@ -3106,11 +3869,23 @@ function emitMock(event, payload) {
 function mockSetupStatus() {
   const flatpak = Boolean(MOCK.setup.flatpak);
   const flathub = Boolean(MOCK.setup.flathub);
+  const snap = Boolean(MOCK.setup.snap);
+  const brew = Boolean(MOCK.setup.brew);
   return {
     flatpakAvailable: flatpak,
     flatpakVersion: flatpak ? "1.18.4" : null,
     flathubAvailable: flathub,
     userFlathubAvailable: flathub,
+    snapAvailable: snap,
+    snapVersion: snap ? "2.68.3" : null,
+    snapdRunning: snap,
+    snapInstallSupported: true,
+    snapManualCommand: "sudo pacman -S snapd && sudo systemctl enable --now snapd.socket",
+    brewAvailable: brew,
+    brewVersion: brew ? "4.6.4" : null,
+    brewPrefix: brew ? "/home/linuxbrew/.linuxbrew" : null,
+    brewInstallSupported: true,
+    brewManualCommand: "/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"",
     ready: flatpak && flathub,
     distroId: "fedora",
     distroName: "Fedora Linux 42 (Workstation)",
@@ -3157,6 +3932,86 @@ async function mockInstallFlatpak() {
   return mockSetupStatus();
 }
 
+async function mockInstallSnap() {
+  if (!MOCK.setup.snap) {
+    emitMock("setup-log", { line: "Komut: pkexec /usr/bin/dnf install -y snapd", kind: "cmd" });
+    await sleep(300);
+    emitMock("setup-log", { line: "snapd, DNF · Fedora/RHEL ile kuruluyor…", kind: "info" });
+    await sleep(900);
+    emitMock("setup-log", { line: "snapd hizmeti etkinleştirildi.", kind: "info" });
+    MOCK.setup.snap = true;
+  }
+  mockSave("macro-mock-setup", MOCK.setup);
+  await sleep(350);
+  emitMock("setup-log", { line: "✓ Snap kullanıma hazır.", kind: "info" });
+  const status = mockSetupStatus();
+  emitMock("setup-finished", status);
+  return status;
+}
+
+async function mockInstallHomebrew() {
+  if (!MOCK.setup.brew) {
+    emitMock("setup-log", { line: "Komut: NONINTERACTIVE=1 /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"", kind: "cmd" });
+    await sleep(300);
+    emitMock("setup-log", { line: "Homebrew resmi kurulum betiği çalıştırılıyor…", kind: "info" });
+    await sleep(1000);
+    emitMock("setup-log", { line: "✓ Homebrew kullanıcı dizinine kuruldu.", kind: "info" });
+    MOCK.setup.brew = true;
+  }
+  mockSave("macro-mock-setup", MOCK.setup);
+  await sleep(350);
+  emitMock("setup-log", { line: "✓ Homebrew kullanıma hazır.", kind: "info" });
+  const status = mockSetupStatus();
+  emitMock("setup-finished", status);
+  return status;
+}
+
+function mockPickAppImage() {
+  return "/home/kullanıcı/İndirilenler/MacroOrnek.AppImage";
+}
+
+function mockImportAppImage(path, name) {
+  const clean = String(path || "").trim();
+  if (!/\.appimage$/i.test(clean)) {
+    throw new Error("Seçilen dosya bir .AppImage değil.");
+  }
+  const base = clean.split(/[\\/]/).pop() || "Uygulama.AppImage";
+  const display = String(name || "").trim() || base.replace(/\.appimage$/i, "");
+  const id = `appimage:${mockAppImageSlug(display)}`;
+  const entry = {
+    id,
+    name: display,
+    path: clean,
+    iconPath: null,
+    size: 84_000_000,
+    importedAt: Date.now(),
+  };
+  MOCK.appimages = MOCK.appimages.filter(item => item.id !== id);
+  MOCK.appimages.push(entry);
+  MOCK.installed.add(id);
+  mockSave("macro-mock-appimages", MOCK.appimages);
+  mockSave("macro-mock-installed", [...MOCK.installed]);
+  emitMock("app-log", { line: `✓ ${display} AppImage olarak içe aktarıldı.`, kind: "info" });
+  return mockAppImageItem(entry);
+}
+
+function mockRemoveAppImage(id) {
+  const before = MOCK.appimages.length;
+  MOCK.appimages = MOCK.appimages.filter(entry => entry.id !== id);
+  if (MOCK.appimages.length === before) throw new Error("AppImage bulunamadı.");
+  MOCK.installed.delete(id);
+  mockSave("macro-mock-appimages", MOCK.appimages);
+  mockSave("macro-mock-installed", [...MOCK.installed]);
+  return "AppImage mağazadan kaldırıldı.";
+}
+
+function mockLaunchAppImage(id) {
+  const entry = MOCK.appimages.find(item => item.id === id);
+  if (!entry) throw new Error("AppImage bulunamadı.");
+  emitMock("app-log", { line: `Uygulama başlatıldı: ${entry.path}`, kind: "info" });
+  return null;
+}
+
 async function mockInvoke(command, args = {}) {
   if (command === "get_setup_status") {
     await sleep(260);
@@ -3167,6 +4022,14 @@ async function mockInvoke(command, args = {}) {
     return mockInstallFlatpak();
   }
 
+  if (command === "install_snap") {
+    return mockInstallSnap();
+  }
+
+  if (command === "install_homebrew") {
+    return mockInstallHomebrew();
+  }
+
   if (command === "get_store_info") {
     await sleep(120);
     return {
@@ -3174,6 +4037,11 @@ async function mockInvoke(command, args = {}) {
       flatpakVersion: MOCK.setup.flatpak ? "1.18.4" : null,
       flathubAvailable: Boolean(MOCK.setup.flathub),
       userFlathubAvailable: Boolean(MOCK.setup.flathub),
+      snapAvailable: Boolean(MOCK.setup.snap),
+      snapVersion: MOCK.setup.snap ? "2.68.3" : null,
+      brewAvailable: Boolean(MOCK.setup.brew),
+      brewVersion: MOCK.setup.brew ? "4.6.4" : null,
+      appimageCount: MOCK.appimages.length,
     };
   }
 
@@ -3190,13 +4058,44 @@ async function mockInvoke(command, args = {}) {
   }
 
   if (command === "get_app_detail") {
-    return mockDetail(args.appId || args.app_id);
+    const id = args.id || args.appId || args.app_id;
+    if (id && String(id).includes(":")) return mockSourceDetail(id);
+    return mockDetail(id);
+  }
+
+  if (command === "get_source_discover") {
+    await sleep(180);
+    return mockSourceDiscover(args.source);
   }
 
   if (command === "list_installed_apps") {
     await sleep(180);
-    if (!MOCK.setup.flatpak) return [];
     return mockInstalledApps();
+  }
+
+  if (command === "list_appimages") {
+    await sleep(90);
+    return MOCK.appimages.map(mockAppImageItem);
+  }
+
+  if (command === "pick_appimage_file") {
+    await sleep(120);
+    return mockPickAppImage();
+  }
+
+  if (command === "import_appimage_file") {
+    await sleep(420);
+    return mockImportAppImage(args.path, args.name);
+  }
+
+  if (command === "remove_appimage_file") {
+    await sleep(220);
+    return mockRemoveAppImage(args.id);
+  }
+
+  if (command === "launch_appimage_file") {
+    await sleep(80);
+    return mockLaunchAppImage(args.id);
   }
 
   if (command === "list_flatpak_remotes") {

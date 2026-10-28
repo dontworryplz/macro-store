@@ -1,0 +1,53 @@
+# Maintainer: Macro Store <macro-store@example.invalid>
+pkgname=macro-store
+pkgver=0.4.0
+pkgrel=1
+pkgdesc="Flatpak, Snap, Homebrew ve AppImage destekli Linux uygulama mağazası"
+arch=('x86_64')
+url="https://github.com/turkishcoderxup/macro-store"
+license=('GPL-3.0-or-later')
+depends=('gtk3' 'webkit2gtk-4.1' 'hicolor-icon-theme')
+makedepends=('cargo' 'rust')
+optdepends=(
+  'flatpak: Flatpak ve Flathub kaynağı'
+  'snapd: Snap Store kaynağı (AUR)'
+  'base-devel: Homebrew kurulumu için derleme araçları'
+  'zenity: AppImage dosya seçimi'
+  'kdialog: AppImage dosya seçimi (KDE)'
+)
+provides=('macro-store')
+conflicts=('macro-store-bin')
+# Yerel üretim için sürüm arşivini bu dizine bırakın:
+#   git archive --format=tar.gz --prefix=macro-store-0.4.0/ -o macro-store-0.4.0.tar.gz HEAD
+# Yayın arşivi kullanılacaksa sha256sums güncellenmelidir.
+source=("$pkgname-$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "$srcdir/$pkgname-$pkgver/src-tauri"
+  unset CFLAGS CXXFLAGS LDFLAGS
+  cargo build --release --locked
+}
+
+package() {
+  cd "$srcdir/$pkgname-$pkgver"
+
+  install -Dm755 "src-tauri/target/release/mss" "$pkgdir/usr/bin/macro-store"
+  install -Dm644 "src-tauri/icons/32x32.png" "$pkgdir/usr/share/icons/hicolor/32x32/apps/macro-store.png"
+  install -Dm644 "src-tauri/icons/128x128.png" "$pkgdir/usr/share/icons/hicolor/128x128/apps/macro-store.png"
+  install -Dm644 "src-tauri/icons/256x256.png" "$pkgdir/usr/share/icons/hicolor/256x256/apps/macro-store.png"
+  install -Dm644 "src-tauri/icons/icon.png" "$pkgdir/usr/share/icons/hicolor/1024x1024/apps/macro-store.png"
+  install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/macro-store/LICENSE"
+  install -Dm644 /dev/null "$pkgdir/usr/share/applications/macro-store.desktop"
+  cat > "$pkgdir/usr/share/applications/macro-store.desktop" <<'EOF'
+[Desktop Entry]
+Categories=Utility;
+Comment=Flatpak, Snap, Homebrew ve AppImage destekli Linux uygulama mağazası.
+Exec=macro-store
+StartupWMClass=macro-store
+Icon=macro-store
+Name=Macro Store
+Terminal=false
+Type=Application
+EOF
+}

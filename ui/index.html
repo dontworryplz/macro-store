@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="color-scheme" content="dark light" />
-  <title>Macro Store — Flathub Mağazası</title>
+  <title>Macro Store — Linux Uygulama Mağazası</title>
   <script src="theme-init.js"></script>
   <link rel="stylesheet" href="styles.css" />
 </head>
@@ -13,7 +13,7 @@
     <aside class="sidebar">
       <div class="brand-block">
         <h1 class="brand-name">Macro Store</h1>
-        <p class="brand-sub">Flathub mağazası</p>
+        <p class="brand-sub">Linux mağazası</p>
       </div>
 
       <nav class="nav nav-main" aria-label="Ana gezinme">
@@ -59,7 +59,7 @@
 
       <div class="sidebar-status" title="Mağaza bağlantısı">
         <span id="statusDot" class="status-dot is-pending" aria-hidden="true"></span>
-        <span id="statusText">Flatpak denetleniyor…</span>
+        <span id="statusText">Sistem denetleniyor…</span>
       </div>
     </aside>
 
@@ -79,8 +79,8 @@
           <input
             id="searchInput"
             type="search"
-            placeholder="Flathub’da uygulama ara"
-            aria-label="Flathub’da uygulama ara"
+            placeholder="Uygulama, formül ya da snap ara"
+            aria-label="Uygulama ara"
             autocomplete="off"
             autocapitalize="off"
             spellcheck="false"
@@ -142,7 +142,7 @@
           </span>
           <div class="modal-title">
             <p class="eyebrow">Sistem hazırlığı</p>
-            <h2 id="setupTitle">Flatpak denetleniyor</h2>
+            <h2 id="setupTitle">Sistem denetleniyor</h2>
             <p id="setupSubtitle">Mağaza için gerekli bileşenler kontrol ediliyor.</p>
           </div>
         </div>
@@ -161,7 +161,7 @@
       <header class="modal-head">
         <div class="modal-title">
           <h2 id="logTitle">İşlem günlüğü</h2>
-          <p>Flatpak çıktısı</p>
+          <p>Paket yöneticisi çıktısı</p>
         </div>
         <div class="modal-tools">
           <button id="logClear" class="btn btn-ghost btn-sm" type="button">Temizle</button>
@@ -188,6 +188,53 @@
       <div class="confirm-actions">
         <button class="btn btn-ghost" type="button" data-close-modal="confirmModal">Vazgeç</button>
         <button id="confirmAccept" class="btn btn-primary" type="button">Devam et</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="appimageModal" class="modal" hidden>
+    <div class="modal-card appimage-card" role="dialog" aria-modal="true" aria-labelledby="appimageTitle">
+      <header class="modal-head">
+        <div class="modal-title">
+          <h2 id="appimageTitle">AppImage içe aktar</h2>
+          <p>Dışarıdan edindiğiniz AppImage dosyasını mağazaya ekleyin.</p>
+        </div>
+        <div class="modal-tools">
+          <button class="icon-btn" type="button" data-close-modal="appimageModal" aria-label="Kapat">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="m7 7 10 10M17 7 7 17" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+            </svg>
+          </button>
+        </div>
+      </header>
+      <div class="appimage-body">
+        <label class="form-label" for="appimagePath">AppImage dosyası</label>
+        <div class="path-row">
+          <input
+            id="appimagePath"
+            class="field"
+            type="text"
+            placeholder="/home/kullanıcı/İndirilenler/Uygulama.AppImage"
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <button id="appimagePick" class="btn btn-ghost" type="button" data-appimage-pick>Göz at</button>
+        </div>
+        <label class="form-label" for="appimageName">Görünen ad <span class="form-hint">(isteğe bağlı)</span></label>
+        <input
+          id="appimageName"
+          class="field"
+          type="text"
+          maxlength="80"
+          placeholder="Boş bırakılırsa dosya adı kullanılır"
+          autocomplete="off"
+        />
+        <p class="drop-hint">Dosya kopyalanır, çalıştırılabilir yapılır ve uygulama menüsüne eklenir. Özgün dosya yerinde kalır.</p>
+        <p id="appimageError" class="modal-error" role="alert" hidden></p>
+        <div class="modal-actions">
+          <button class="btn btn-ghost" type="button" data-close-modal="appimageModal">Vazgeç</button>
+          <button id="appimageImport" class="btn btn-primary" type="button" data-appimage-import>İçe aktar</button>
+        </div>
       </div>
     </div>
   </div>
