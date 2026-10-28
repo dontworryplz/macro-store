@@ -135,7 +135,7 @@ struct StoreInfo {
     brew_available: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AppItem {
     id: String,
@@ -167,6 +167,8 @@ struct ProviderIssue {
 struct InstalledAppsResponse {
     apps: Vec<AppItem>,
     provider_errors: Vec<ProviderIssue>,
+    #[serde(default)]
+    from_cache: bool,
 }
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1147,12 +1149,43 @@ fn installed_apps(snapshot: &FlatpakSnapshot) -> Vec<AppItem> {
         .collect()
 }
 
+fn cache_dir() -> Option<PathBuf> {
+    let base = env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
+    Some(base.join("macro-store"))
+}
+
+fn installed_cache_path() -> Option<PathBuf> {
+    cache_dir().map(|dir| dir.join("installed.json"))
+}
+
+fn save_installed_cache(apps: &[AppItem]) {
+    let Some(path) = installed_cache_path() else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    if let Ok(json) = serde_json::to_string(apps) {
+        let _ = fs::write(path, json);
+    }
+}
+
+fn load_installed_cache() -> Vec<AppItem> {
+    installed_cache_path()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|raw| serde_json::from_str::<Vec<AppItem>>(&raw).ok())
+        .unwrap_or_default()
+}
+
 fn installed_apps_response(
     providers: [(&str, Result<Vec<AppItem>, String>); 3],
 ) -> InstalledAppsResponse {
     let mut response = InstalledAppsResponse {
         apps: Vec::new(),
         provider_errors: Vec::new(),
+        from_cache: false,
     };
     for (provider, result) in providers {
         match result {
@@ -1161,6 +1194,15 @@ fn installed_apps_response(
                 provider: provider.to_string(),
                 message,
             }),
+        }
+    }
+    if response.provider_errors.is_empty() && !response.apps.is_empty() {
+        save_installed_cache(&response.apps);
+    } else if response.apps.is_empty() {
+        let cached = load_installed_cache();
+        if !cached.is_empty() {
+            response.apps = cached;
+            response.from_cache = true;
         }
     }
     response

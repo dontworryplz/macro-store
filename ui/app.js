@@ -447,6 +447,7 @@ const state = {
   discoverSeq: 0,
   installed: [],
   installedLoaded: false,
+  installedFromCache: false,
   installedLoading: false,
   installedError: "",
   installedProviderErrors: [],
@@ -1607,6 +1608,7 @@ async function loadInstalled(force = false, silent = false) {
     state.installedProviderErrors = Array.isArray(response?.providerErrors)
       ? response.providerErrors
       : [];
+    state.installedFromCache = Boolean(response?.fromCache);
     state.installedVisibleCount = INSTALLED_PAGE_SIZE;
     state.installedLoaded = true;
     state.installedError = "";
@@ -2454,6 +2456,7 @@ function renderInstalled() {
     distributionText ? `(${distributionText})` : "",
     updates ? `${updates} güncelleme` : "",
     state.libraryUsage?.totalBytes ? `${formatBytes(state.libraryUsage.totalBytes)} Flatpak alanı` : "",
+    state.installedFromCache ? "önbellekten" : "",
   ].filter(Boolean).join(" · ");
   const refreshedText = state.lastRefreshed ? `Son kontrol: ${formatClock(state.lastRefreshed)}` : "";
   const selectedApps = selectedInstalledApps();
