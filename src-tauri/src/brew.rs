@@ -840,6 +840,17 @@ fn detail_sync(kind: PackageKind, token: &str) -> Result<ProviderDetail, String>
     let description = field_string(record, &["desc", "description"])
         .map(|value| truncate(value, 4_000))
         .unwrap_or_default();
+    let caveats = field_string(record, &["caveats"]).unwrap_or_default();
+    let description = if caveats.is_empty() {
+        description
+    } else if description.is_empty() {
+        truncate(caveats, 4_000)
+    } else {
+        truncate(
+            &format!("{description}\n\nNotlar / Uyarılar:\n{caveats}"),
+            4_000,
+        )
+    };
     let homepage = field_string(record, &["homepage"]).map(|value| truncate(value, 2_000));
     let license = match record.get("license") {
         Some(Value::String(value)) => truncate(value, 300),
@@ -1062,5 +1073,18 @@ mod tests {
             false,
         );
         assert!(!unpinned.pinned);
+    }
+    #[test]
+    fn detail_appends_caveats_when_present() {
+        let record = json!({
+            "name": "tool",
+            "desc": "A useful CLI tool",
+            "caveats": "Run 'tool setup' before first use."
+        });
+        let desc = field_string(&record, &["desc", "description"]).unwrap_or_default();
+        let cav = field_string(&record, &["caveats"]).unwrap_or_default();
+        let combined = format!("{desc}\n\nNotlar / Uyarılar:\n{cav}");
+        assert!(combined.contains("A useful CLI tool"));
+        assert!(combined.contains("Run 'tool setup' before first use."));
     }
 }

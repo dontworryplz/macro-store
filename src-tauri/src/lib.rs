@@ -1226,7 +1226,7 @@ fn app_from_snap(item: snap::ProviderApp) -> AppItem {
         channel: item.channel,
         category: item.category,
         monthly_installs: None,
-        hero_image: None,
+        hero_image: item.hero_image,
     }
 }
 
@@ -1862,12 +1862,16 @@ async fn get_app_detail(app_id: String, provider: String) -> Result<AppDetail, S
             Ok(AppDetail {
                 app,
                 description: detail.description,
-                screenshots: Vec::new(),
+                screenshots: detail
+                    .screenshots
+                    .into_iter()
+                    .map(|url| ScreenshotItem { url, caption: None })
+                    .collect(),
                 categories,
                 license: detail.license,
-                verified: false,
+                verified: detail.verified,
                 homepage: detail.homepage,
-                download_size: None,
+                download_size: detail.download_size,
                 installed_size: None,
                 installs_last_month: None,
                 rating: None,

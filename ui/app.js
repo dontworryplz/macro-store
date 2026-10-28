@@ -2053,7 +2053,7 @@ function renderDetail() {
       <div class="detail-intro">
         <div class="detail-title-line">
           <h1>${escapeHtml(app.name || app.id)}</h1>
-          ${isFlatpak && detail.verified ? `<span class="verified-badge">${ICON.check}Doğrulanmış</span>` : ""}
+          ${detail.verified ? `<span class="verified-badge">${ICON.check}Doğrulanmış</span>` : ""}
         </div>
         ${app.developer ? `<p class="detail-dev">${escapeHtml(app.developer)}</p>` : ""}
         ${app.summary ? `<p class="detail-summary">${escapeHtml(app.summary)}</p>` : ""}
@@ -2254,6 +2254,7 @@ function applyAction(action, provider, id) {
       state.installed.sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "tr", { sensitivity: "base" }));
     }
   }
+  updateInstalledCount();
 }
 
 async function performAction(action, app) {
@@ -2795,7 +2796,13 @@ function bindEvents() {
       return;
     }
 
-    if (event.key === "Escape" && state.route.name === "detail") {
+    if (event.key === "Escape" && ["detail", "category"].includes(state.route.name)) {
+      event.preventDefault();
+      goBack();
+      return;
+    }
+
+    if (event.altKey && event.key === "ArrowLeft" && !isTypingTarget(event.target)) {
       event.preventDefault();
       goBack();
       return;
@@ -3094,13 +3101,25 @@ async function mockSearch(query) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query, hits_per_page: 36, page: 1 }),
     });
-    return (data.hits || []).map(mockApiApp);
+    flathubApps = (data.hits || []).map(mockApiApp);
   } catch {
-    const needle = String(query).toLocaleLowerCase("tr");
-    return mockFallbackList().filter(app =>
+    flathubApps = mockFallbackList().filter(app =>
       `${app.name} ${app.summary} ${app.id}`.toLocaleLowerCase("tr").includes(needle),
     );
   }
+  const snapSample = [
+    { id: "vlc", provider: "snap", packageType: "snap", name: "VLC", summary: "VLC media player", developer: "VideoLAN", version: "3.0.21", icon: null, installed: false, updateAvailable: false, pinned: false, channel: "latest/stable", category: "audiovideo", monthlyInstalls: null, heroImage: null },
+    { id: "firefox", provider: "snap", packageType: "snap", name: "Firefox", summary: "Mozilla Firefox web browser", developer: "Mozilla", version: "132.0", icon: null, installed: false, updateAvailable: false, pinned: false, channel: "latest/stable", category: "network", monthlyInstalls: null, heroImage: null },
+    { id: "code", provider: "snap", packageType: "snap", name: "Visual Studio Code", summary: "Code editing. Redefined.", developer: "Microsoft", version: "1.95.0", icon: null, installed: false, updateAvailable: false, pinned: false, channel: "latest/stable", category: "development", monthlyInstalls: null, heroImage: null },
+  ].filter(app => `${app.name} ${app.summary} ${app.id}`.toLocaleLowerCase("tr").includes(needle));
+
+  const brewSample = [
+    { id: "formula/ripgrep", provider: "brew", packageType: "formula", name: "ripgrep", summary: "Fast regex line-oriented search tool", developer: "BurntSushi", version: "14.1.1", icon: null, installed: false, updateAvailable: false, pinned: false, channel: null, category: "utility", monthlyInstalls: null, heroImage: null },
+    { id: "formula/git", provider: "brew", packageType: "formula", name: "git", summary: "Distributed revision control system", developer: "Git Community", version: "2.47.0", icon: null, installed: false, updateAvailable: false, pinned: false, channel: null, category: "development", monthlyInstalls: null, heroImage: null },
+    { id: "cask/firefox", provider: "brew", packageType: "cask", name: "firefox", summary: "Web browser", developer: "Mozilla", version: "132.0", icon: null, installed: false, updateAvailable: false, pinned: false, channel: null, category: "network", monthlyInstalls: null, heroImage: null },
+  ].filter(app => `${app.name} ${app.summary} ${app.id}`.toLocaleLowerCase("tr").includes(needle));
+
+  return [...flathubApps, ...snapSample, ...brewSample];
 }
 
 async function mockCategory(slug, page = 1) {
@@ -3158,8 +3177,76 @@ function mockReviews(app) {
 }
 
 async function mockDetail(id, provider = "flatpak") {
-  if (provider !== "flatpak") {
-    throw new Error("Tarayıcı demosunda Snap ve Homebrew için örnek uygulama yok.");
+  if (provider === "snap") {
+    const installed = state.installed.find(app => sameApp(app, "snap", id));
+    const app = installed || {
+      id,
+      provider: "snap",
+      packageType: "snap",
+      name: id,
+      summary: "Snap Store paketi.",
+      developer: "Snapcraft",
+      version: "1.0",
+      icon: null,
+      installed: false,
+      updateAvailable: false,
+      pinned: false,
+      channel: "latest/stable",
+      category: "utilities",
+      monthlyInstalls: null,
+      heroImage: null,
+    };
+    return {
+      app,
+      description: `${app.name}, Snap Store üzerinden dağıtılan ve sistem genelinde izole sandbox ortamında çalışan bir pakettir.`,
+      screenshots: [],
+      categories: ["utilities"],
+      license: "Proprietary / Open Source",
+      verified: true,
+      homepage: `https://snapcraft.io/${encodeURIComponent(id)}`,
+      downloadSize: 45 * 1024 * 1024,
+      installedSize: 120 * 1024 * 1024,
+      installsLastMonth: null,
+      rating: null,
+      reviews: [],
+    };
+  }
+
+  if (provider === "brew") {
+    const installed = state.installed.find(app => sameApp(app, "brew", id));
+    const token = id.replace(/^(formula|cask)\//, "");
+    const isCask = id.startsWith("cask/");
+    const app = installed || {
+      id,
+      provider: "brew",
+      packageType: isCask ? "cask" : "formula",
+      name: token,
+      summary: `Homebrew ${isCask ? "cask" : "formula"} paketi.`,
+      developer: "Homebrew",
+      version: "1.0",
+      icon: null,
+      installed: false,
+      updateAvailable: false,
+      pinned: false,
+      channel: null,
+      category: "utilities",
+      monthlyInstalls: null,
+      heroImage: null,
+    };
+    return {
+      app,
+      description: `${app.name}, Linux Homebrew ile kurulan bir ${isCask ? "cask grafik arayüz uygulamasıdır" : "komut satırı veya sistem aracıdır"}.`,
+      screenshots: [],
+      categories: ["utilities"],
+      license: "MIT",
+      verified: false,
+      homepage: `https://formulae.brew.sh/${encodeURIComponent(id)}`,
+      downloadSize: null,
+      installedSize: null,
+      installsLastMonth: null,
+      rating: null,
+      reviews: [],
+    };
   }
   const { appstream } = await mockAppstream(id);
   const screenshots = mockScreenshots(appstream);

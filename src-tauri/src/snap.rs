@@ -42,6 +42,7 @@ pub struct ProviderApp {
     pub channel: Option<String>,
     pub category: Option<String>,
     pub package_type: Option<String>,
+    pub hero_image: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -50,6 +51,9 @@ pub struct ProviderDetail {
     pub description: String,
     pub homepage: Option<String>,
     pub license: String,
+    pub screenshots: Vec<String>,
+    pub download_size: Option<u64>,
+    pub verified: bool,
 }
 
 struct SnapSnapshot {
@@ -382,6 +386,53 @@ fn snap_icon(snap: &Value) -> Option<String> {
     }
     safe_icon_url(snap.get("icon"))
 }
+fn snap_first_screenshot(snap: &Value) -> Option<String> {
+    let media = snap.get("media").and_then(Value::as_array)?;
+    for entry in media {
+        if entry
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("screenshot"))
+        {
+            if let Some(url) = safe_icon_url(entry.get("url")) {
+                return Some(url);
+            }
+        }
+    }
+    None
+}
+
+fn snap_screenshots(snap: &Value) -> Vec<String> {
+    let mut screenshots = Vec::new();
+    if let Some(media) = snap.get("media").and_then(Value::as_array) {
+        for entry in media {
+            if entry
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind.eq_ignore_ascii_case("screenshot"))
+            {
+                if let Some(url) = safe_icon_url(entry.get("url")) {
+                    screenshots.push(url);
+                    if screenshots.len() >= 10 {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    screenshots
+}
+
+fn is_publisher_verified(snap: &Value) -> bool {
+    snap.get("publisher")
+        .and_then(|publisher| publisher.get("validation"))
+        .and_then(Value::as_str)
+        .is_some_and(|val| val.eq_ignore_ascii_case("verified"))
+        || snap
+            .get("developer-validation")
+            .and_then(Value::as_str)
+            .is_some_and(|val| val.eq_ignore_ascii_case("verified"))
+}
 
 fn category_name(snap: &Value) -> Option<String> {
     snap.get("categories")
@@ -449,6 +500,7 @@ fn search_app(snap: &Value, state: &SnapSnapshot) -> Option<ProviderApp> {
             .and_then(|app| app.channel.clone()),
         category: category_name(snap),
         package_type: Some("snap".to_string()),
+        hero_image: snap_first_screenshot(snap),
     })
 }
 
@@ -507,6 +559,7 @@ fn parse_installed_rows(output: &str) -> Result<Vec<ProviderApp>, String> {
             update_available: false,
             category: None,
             package_type: Some("snap".to_string()),
+            hero_image: None,
         });
     }
     if !header_seen
@@ -779,6 +832,12 @@ pub async fn detail(id: &str) -> Result<ProviderDetail, String> {
             description: clean_field(snap.get("description"), 20_000),
             homepage: safe_homepage(snap.get("website")),
             license: license_text(snap.get("license")),
+            screenshots: snap_screenshots(snap),
+            download_size: snap
+                .get("download-size")
+                .or_else(|| snap.get("download_size"))
+                .and_then(Value::as_u64),
+            verified: is_publisher_verified(snap),
         })
     })
     .await
@@ -906,5 +965,25 @@ mod tests {
         assert!(safe_icon_url(Some(&trusted)).is_some());
         assert!(safe_icon_url(Some(&untrusted)).is_none());
         assert!(safe_icon_url(Some(&json!("http://snapcraft.io/icon.png"))).is_none());
+    }
+    #[test]
+    fn snap_screenshots_and_verification_extract_safely() {
+        let snap = json!({
+            "media": [
+                {"type": "screenshot", "url": "https://dashboard.snapcraft.io/shot1.png"},
+                {"type": "screenshot", "url": "http://insecure.invalid/shot2.png"},
+                {"type": "icon", "url": "https://dashboard.snapcraft.io/icon.png"}
+            ],
+            "publisher": {
+                "validation": "verified"
+            }
+        });
+        let shots = snap_screenshots(&snap);
+        assert_eq!(shots, vec!["https://dashboard.snapcraft.io/shot1.png"]);
+        assert_eq!(
+            snap_first_screenshot(&snap).as_deref(),
+            Some("https://dashboard.snapcraft.io/shot1.png")
+        );
+        assert!(is_publisher_verified(&snap));
     }
 }
