@@ -13,6 +13,8 @@ const LAST_REFRESH_KEY = "macro-last-refresh";
 const FAVORITES_KEY = "macro-favorites";
 const RECENTS_KEY = "macro-recents";
 const RECENTS_LIMIT = 5;
+const ACTIVITY_KEY = "macro-activity";
+const ACTIVITY_LIMIT = 25;
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -22,6 +24,7 @@ const ACTIONS = {
   update: { busy: "Güncelleniyor…", verb: "güncelleniyor", done: "Güncelleme tamamlandı." },
   remove: { busy: "Kaldırılıyor…", verb: "kaldırılıyor", done: "Kaldırma tamamlandı." },
 };
+const ACTION_LABELS = { install: "Kurulum", update: "Güncelleme", remove: "Kaldırma" };
 const PROVIDER_NAMES = { flatpak: "Flatpak", snap: "Snap", brew: "Homebrew" };
 const PROVIDER_FILTERS = [
   { value: "all", label: "Tümü" },
@@ -448,6 +451,7 @@ const state = {
   lastRefreshed: null,
   favorites: [],
   recents: [],
+  activityHistory: [],
   cliApp: null,
   cliCommands: [],
   category: null,
@@ -533,6 +537,7 @@ const els = {
 };
 
 let searchTimer = null;
+let installedSearchTimer = null;
 let activityTimer = null;
 let toastTimer = null;
 let toastSeq = 0;
@@ -738,6 +743,22 @@ function toggleSelection(app) {
   else state.selection.add(key);
 }
 
+function librarySearchMatches(app, needle) {
+  if (!needle) return true;
+  const haystack = `${app.name || ""} ${app.id || ""} ${app.developer || ""} ${app.summary || ""} ${providerName(appProvider(app))}`
+    .toLocaleLowerCase("tr");
+  return haystack.includes(needle);
+}
+
+function installedScopedApps() {
+  const needle = state.installedQuery.trim().toLocaleLowerCase("tr");
+  return state.installed.filter(app =>
+    providerMatches(app, state.installedProvider)
+    && (!state.updatesOnly || app.updateAvailable)
+    && librarySearchMatches(app, needle),
+  );
+}
+
 function sortInstalledApps(apps, sort) {
   const byName = (a, b) => String(a.name || a.id || "").localeCompare(String(b.name || b.id || ""), "tr", { sensitivity: "base" });
   const list = [...apps];
@@ -756,7 +777,14 @@ function matchesApps(provider, id) {
 }
 
 
-function actionButtonsHtml(app, { large = false, hero = false, allowRemove = true } = {}) {  const size = large ? "btn-lg" : "btn-sm";
+function favoriteButtonHtml(app, { large = false } = {}) {
+  const active = isFavorite(app);
+  const label = active ? "Favorilerden çıkar" : "Favorilere ekle";
+  return `<button class="icon-btn fav-btn${active ? " is-favorite" : ""}${large ? " fav-btn-lg" : ""}" type="button" data-favorite data-id="${attr(app.id)}" data-provider="${attr(appProvider(app))}" aria-pressed="${active}" title="${attr(label)}" aria-label="${attr(`${app.name || app.id} · ${label}`)}">${active ? ICON.starFilled : ICON.star}</button>`;
+}
+
+function actionButtonsHtml(app, { large = false, hero = false, allowRemove = true } = {}) {
+  const size = large ? "btn-lg" : "btn-sm";
   const primary = hero ? `btn btn-hero-primary ${size}` : `btn btn-primary ${size}`;
   const ghost = hero ? `btn btn-hero-ghost ${size}` : `btn btn-ghost ${size}`;
   const id = attr(app.id);
@@ -801,7 +829,7 @@ function appRowHtml(app, context = "search", { selectable = false, selected = fa
         ${summary ? `<p class="app-summary">${escapeHtml(summary)}</p>` : ""}
         ${appMetaHtml(app)}
       </div>
-      ${selectable ? "" : `<div class="app-actions">${actionButtonsHtml(app)}</div>`}
+      ${selectable ? "" : `<div class="app-actions">${favoriteButtonHtml(app)}${actionButtonsHtml(app)}</div>`}
     </article>`;
 }
 
@@ -1415,6 +1443,12 @@ function updateInstalledCount() {
   els.installedCount.textContent = String(count);
 }
 
+function updateFavoritesCount() {
+  const count = state.favorites.length;
+  els.favoritesCount.hidden = count === 0;
+  els.favoritesCount.textContent = String(count);
+}
+
 function updatePageTitle() {
   const route = state.route;
   if (route.name === "detail" && state.detail?.app?.name) {
@@ -1423,6 +1457,8 @@ function updatePageTitle() {
     document.title = `${CATEGORY_MAP[route.slug].name} — Macro Store`;
   } else if (route.name === "search" && state.query) {
     document.title = state.query.length >= 2 ? `“${state.query}” — Macro Store` : "Arama — Macro Store";
+  } else if (route.name === "favorites") {
+    document.title = "Favoriler — Macro Store";
   } else {
     document.title = "Macro Store — Linux Uygulama Mağazası";
   }
@@ -1433,6 +1469,7 @@ function renderChrome() {
     button.classList.toggle("is-active", button.dataset.nav === state.activeNav);
   });
   updateInstalledCount();
+  updateFavoritesCount();
   updateStatus();
   els.searchClear.hidden = !els.searchInput.value;
   els.backButton.hidden = !(state.stack.length > 1 && ["detail", "category"].includes(state.route.name));
@@ -1447,6 +1484,8 @@ function navForRoute(route) {
     case "categories":
     case "category":
       return "categories";
+    case "favorites":
+      return "favorites";
     case "installed":
       return "installed";
     case "settings":
@@ -1561,6 +1600,7 @@ async function loadInstalled(force = false, silent = false) {
     for (const key of state.selection) {
       if (!available.has(key)) state.selection.delete(key);
     }
+    if (!state.installedProviderErrors.length) syncStoredFromInstalled();
   } catch (err) {
     if (seq !== state.installedSeq) return;
     if (!silent) state.installedError = errText(err);
@@ -1618,6 +1658,51 @@ function loadLastRefresh() {
   } catch {
     state.lastRefreshed = null;
   }
+}
+
+function loadActivityHistory() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(ACTIVITY_KEY) || "[]");
+    if (!Array.isArray(raw)) return;
+    state.activityHistory = raw
+      .filter(item => item && typeof item.name === "string" && Number.isFinite(item.time))
+      .slice(0, ACTIVITY_LIMIT);
+  } catch {
+    state.activityHistory = [];
+  }
+}
+
+function saveActivityHistory() {
+  try {
+    localStorage.setItem(ACTIVITY_KEY, JSON.stringify(state.activityHistory));
+  } catch {
+    /* Depolama kapalıysa geçmiş yalnızca oturum boyunca tutulur. */
+  }
+}
+
+function recordActivity({ action, app = null, name = "", ok = true, message = "" }) {
+  if (!ACTION_LABELS[action] && !name) return;
+  const entry = {
+    action: ACTION_LABELS[action] ? action : "batch",
+    label: ACTION_LABELS[action] || "Toplu işlem",
+    name: name || app?.name || app?.id || "",
+    id: app?.id || "",
+    provider: app ? appProvider(app) : "",
+    ok: Boolean(ok),
+    message: String(message || "").slice(0, 180),
+    time: Date.now(),
+  };
+  state.activityHistory = [entry, ...state.activityHistory].slice(0, ACTIVITY_LIMIT);
+  saveActivityHistory();
+  if (state.route.name === "settings") renderSettings();
+}
+
+function activityTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const today = new Date();
+  if (date.toDateString() === today.toDateString()) return formatClock(value);
+  return formatDate(Math.floor(value / 1000));
 }
 
 function saveSearchHistory(list) {
@@ -1784,6 +1869,7 @@ async function loadDetail(id, provider = "flatpak", force = false) {
     const data = await invoke("get_app_detail", { appId: id, provider });
     if (seq !== state.detailSeq) return;
     state.detail = data;
+    rememberRecent(data.app);
     if (provider === "flatpak" && data?.app?.installed) {
       loadPermissions(id);
     } else {
@@ -1918,6 +2004,7 @@ function renderRoute() {
     search: els.searchView,
     categories: els.categoriesView,
     category: els.categoryView,
+    favorites: els.favoritesView,
     installed: els.installedView,
     detail: els.detailView,
     settings: els.settingsView,
@@ -1939,6 +2026,9 @@ function renderRoute() {
       break;
     case "category":
       renderCategory();
+      break;
+    case "favorites":
+      renderFavorites();
       break;
     case "installed":
       renderInstalled();
@@ -2016,6 +2106,17 @@ function renderDiscover() {
   const hero = data.appOfDay;
 
   const sections = [];
+  const recentApps = state.recents.map(storedAppForView);
+  if (recentApps.length) {
+    sections.push(`
+      <section>
+        <div class="section-head">
+          <h2>Son görüntülenenler</h2>
+          <button class="chip" type="button" data-clear-recents>Temizle</button>
+        </div>
+        <div class="app-list">${recentApps.map(app => appRowHtml(app, "recent")).join("")}</div>
+      </section>`);
+  }
   if (picks.length) {
     sections.push(`
       <section>
@@ -2226,15 +2327,44 @@ function renderCategory() {
     ${body}`;
 }
 
+function renderFavorites() {
+  const apps = state.favorites.map(storedAppForView);
+  const installedCount = apps.filter(app => app.installed).length;
+  const summary = apps.length
+    ? `${apps.length} uygulama${installedCount ? ` · ${installedCount} yüklü` : ""}`
+    : "Kaydettiğiniz uygulamalar burada görünür.";
+
+  const body = apps.length
+    ? `<div class="app-list">${apps.map(app => appRowHtml(app, "favorites")).join("")}</div>`
+    : stateHtml({
+      title: "Henüz favori yok",
+      text: "Bir uygulamanın yıldızına dokunarak favorilerinize ekleyin. Liste cihazınızda saklanır.",
+      icon: ICON.star,
+      action: '<button class="btn btn-ghost" type="button" data-nav="discover">Keşfet’e göz at</button>',
+    });
+
+  els.favoritesView.innerHTML = `
+    <header class="view-head">
+      <div class="view-title">
+        <p class="eyebrow">Kitaplık</p>
+        <h1>Favoriler</h1>
+        <p class="view-sub">${escapeHtml(summary)}</p>
+      </div>
+      ${apps.length ? `<div class="view-tools">
+        <button class="chip" type="button" data-clear-favorites>Favorileri temizle</button>
+      </div>` : ""}
+    </header>
+    ${storeNoticeHtml()}
+    ${body}`;
+}
+
 function renderInstalled() {
   const updates = state.installed.filter(app => app.updateAvailable).length;
   if (!updates) state.updatesOnly = false;
   const provider = state.installedProvider;
   const providerApps = state.installed.filter(app => providerMatches(app, provider));
-  const visible = sortInstalledApps(
-    state.updatesOnly ? providerApps.filter(app => app.updateAvailable) : providerApps,
-    state.installedSort,
-  );
+  const visible = sortInstalledApps(installedScopedApps(), state.installedSort);
+  const searchActive = Boolean(state.installedQuery.trim());
   const pending = providerApps.filter(app => app.updateAvailable).length;
   const countPool = state.updatesOnly
     ? state.installed.filter(app => app.updateAvailable)
@@ -2273,6 +2403,13 @@ function renderInstalled() {
       text: providerErrors.map(issue => `${providerName(issue.provider)}: ${issue.message}`).join(" · "),
       retry: "installed",
       icon: ICON.warning,
+    });
+  } else if (!visible.length && searchActive) {
+    body = stateHtml({
+      title: "Kitaplıkta sonuç yok",
+      text: `“${state.installedQuery.trim()}” için yüklü uygulama bulunamadı. Farklı bir ad ya da sağlayıcı deneyin.`,
+      icon: ICON.search,
+      action: '<button class="btn btn-ghost" type="button" data-clear-installed-search>Aramayı temizle</button>',
     });
   } else if (!visible.length) {
     const providerNameText = provider === "all" ? "" : providerName(provider);
@@ -2319,9 +2456,14 @@ function renderInstalled() {
         <p class="view-sub">${escapeHtml(summaryText)}${refreshedText ? `<span class="dot">·</span>${escapeHtml(refreshedText)}` : ""}</p>
       </div>
       ${state.installed.length ? `<div class="view-tools">
+        <label class="library-search">
+          ${ICON.search}
+          <input type="search" data-installed-search value="${attr(state.installedQuery)}" placeholder="Kitaplıkta ara" aria-label="Yüklü uygulamalarda ara" autocomplete="off" spellcheck="false" />
+        </label>
         ${state.selectionMode ? `<div class="selection-actions">
           <span class="selection-count">${selectedApps.length} seçili</span>
           <button class="btn btn-ghost btn-sm" type="button" data-select-all>Tümünü seç</button>
+          <button class="btn btn-ghost btn-sm" type="button" data-copy-selected${selectedApps.length ? "" : " disabled"}>Seçilenleri kopyala</button>
           <button class="btn btn-primary btn-sm" type="button" data-remove-selected${selectedApps.length ? "" : " disabled"}>Seçilenleri kaldır (${selectedApps.length})</button>
         </div>` : ""}
         ${!state.selectionMode && (pending || state.batch) ? `<button class="btn btn-primary btn-sm" type="button" data-update-all${state.busy || state.batch ? " disabled" : ""} aria-label="Bekleyen güncellemeleri sırayla uygula">
@@ -2335,6 +2477,7 @@ function renderInstalled() {
         </button>` : ""}
         ${providerFilterHtml("installed", provider, countPool)}
         ${state.selectionMode ? "" : sortFilterHtml()}
+        ${!state.selectionMode ? `<button class="chip" type="button" data-copy-installed>Listeyi kopyala</button>` : ""}
         <button class="chip" type="button" data-selection-toggle aria-pressed="${state.selectionMode}">
           ${state.selectionMode ? "Seçimi kapat" : "Seç"}
         </button>
@@ -2649,6 +2792,7 @@ function renderDetail() {
         ${tags.length ? `<div class="detail-tags">${tags.join("")}</div>` : ""}
         <div class="detail-actions">
           ${detailActionButtons(app)}
+          ${favoriteButtonHtml(app, { large: true })}
           ${command ? `<button class="btn btn-ghost btn-sm" type="button" data-copy-command="${attr(command)}" title="${attr(command)}" aria-label="CLI kurulum komutunu kopyala">${ICON.copy}Komutu kopyala</button>` : ""}
           <button class="btn btn-ghost btn-sm" type="button" data-cli data-id="${attr(app.id)}" data-provider="${attr(provider)}">CLI komutları</button>
           <span class="detail-size">${detail.downloadSize ? `İndirme: ${formatBytes(detail.downloadSize)} · ` : ""}${escapeHtml(providerInstallInfo(app))}</span>
@@ -2726,6 +2870,20 @@ function renderSettings() {
         : "Eklenmeli";
   const flatpakStatusClass = typeof flatpakAvailable !== "boolean" ? "is-pending" : flatpakReady ? "is-ok" : "is-error";
   const flathubStatusClass = typeof flathubAvailable !== "boolean" ? "is-pending" : flathubReady ? "is-ok" : "is-error";
+  const activityBody = state.activityHistory.length
+    ? `<ul class="activity-list">
+        ${state.activityHistory.map(entry => `
+          <li class="activity-row">
+            <span class="status-dot ${entry.ok ? "is-ok" : "is-error"}" aria-hidden="true"></span>
+            <div class="activity-copy">
+              <div class="activity-title"><strong>${escapeHtml(entry.name || entry.label)}</strong><span>${escapeHtml(entry.label)}</span></div>
+              ${entry.message ? `<p>${escapeHtml(entry.message)}</p>` : ""}
+            </div>
+            <time datetime="${new Date(entry.time).toISOString()}">${escapeHtml(activityTime(entry.time))}</time>
+          </li>`).join("")}
+      </ul>
+      <button class="btn btn-ghost" type="button" data-clear-activity>Geçmişi temizle</button>`
+    : '<div class="repo-empty">Henüz işlem geçmişi yok. Kurulum, güncelleme ve kaldırma işlemleri burada listelenir.</div>';
 
   els.settingsView.innerHTML = `
     <header class="view-head">
@@ -2794,6 +2952,14 @@ function renderSettings() {
 
     <section class="settings-section">
       <div class="settings-head">
+        <h2>İşlem geçmişi</h2>
+        <p>Son kurulum, güncelleme ve kaldırma işlemleri yalnızca bu cihazda saklanır.</p>
+      </div>
+      ${activityBody}
+    </section>
+
+    <section class="settings-section">
+      <div class="settings-head">
         <h2>Mağaza bilgileri</h2>
       </div>
       <div class="about-lines">
@@ -2816,6 +2982,7 @@ function patchApp(app, action, provider, id) {
   } else if (action === "update") {
     app.updateAvailable = false;
   }
+  syncStoredApp(app);
 }
 
 function applyAction(action, provider, id) {
@@ -2826,6 +2993,8 @@ function applyAction(action, provider, id) {
     state.discover?.picks || [],
     state.discover?.popular || [],
     state.discover?.recent || [],
+    state.favorites,
+    state.recents,
   ];
   for (const list of lists) list.forEach(app => patchApp(app, action, provider, id));
   if (state.discover?.appOfDay) patchApp(state.discover.appOfDay, action, provider, id);
@@ -2863,8 +3032,10 @@ async function performAction(action, app) {
       throw new Error(outcome.message || "İşlem başarısız oldu.");
     }
     applyAction(action, provider, app.id);
+    recordActivity({ action, app, ok: true, message: outcome?.message || "" });
     toast(outcome?.message || ACTIONS[action].done, "success");
   } catch (err) {
+    recordActivity({ action, app, ok: false, message: errText(err) });
     toast(errText(err), "error");
     openLogModal();
   } finally {
@@ -2953,6 +3124,7 @@ async function runBatchAction(action, targets) {
   if (batch.failed) parts.push(`${batch.failed} uygulama ${failureNoun}`);
   if (batch.canceled) parts.push("kalan işlem iptal edildi");
   const message = parts.length ? `${parts.join(", ")}.` : "İşlem tamamlanmadı.";
+  recordActivity({ action, name: `${batch.total} uygulama`, ok: batch.failed === 0, message });
   toast(message, batch.failed && !batch.done ? "error" : "success");
   if (batch.failed && !batch.done) openLogModal();
 
@@ -3255,6 +3427,22 @@ function bindEvents() {
   });
 
   els.searchClear.addEventListener("click", () => resetSearch({ goDiscover: true, focus: true }));
+
+  document.addEventListener("input", event => {
+    const input = event.target instanceof Element ? event.target.closest("[data-installed-search]") : null;
+    if (!input || state.route.name !== "installed") return;
+    state.installedQuery = input.value;
+    state.installedVisibleCount = INSTALLED_PAGE_SIZE;
+    clearTimeout(installedSearchTimer);
+    installedSearchTimer = setTimeout(() => {
+      renderInstalled();
+      const next = $("[data-installed-search]");
+      if (next) {
+        next.focus();
+        next.setSelectionRange(next.value.length, next.value.length);
+      }
+    }, 120);
+  });
   els.backButton.addEventListener("click", goBack);
   els.refreshButton.addEventListener("click", refreshCurrent);
   els.logButton.addEventListener("click", openLogModal);
@@ -3324,6 +3512,41 @@ function bindEvents() {
       copyCommand(copyTarget.dataset.copyCommand);
       return;
     }
+
+    const favoriteButton = target.closest("[data-favorite]");
+    if (favoriteButton) {
+      const id = favoriteButton.dataset.id;
+      const provider = favoriteButton.dataset.provider || "flatpak";
+      const app = findKnownApp(provider, id);
+      if (app) toggleFavorite(app);
+      return;
+    }
+
+    const clearFavorites = target.closest("[data-clear-favorites]");
+    if (clearFavorites) {
+      askConfirm({
+        title: "Favorileri temizle",
+        text: "Kaydedilen tüm favori uygulamalar listeden kaldırılacak. Yüklü uygulamalar etkilenmez.",
+        label: "Temizle",
+        onConfirm: () => {
+          state.favorites = [];
+          saveStoredApps(FAVORITES_KEY, state.favorites);
+          renderChrome();
+          renderFavorites();
+          toast("Favoriler temizlendi.", "success");
+        },
+      });
+      return;
+    }
+
+    const clearRecents = target.closest("[data-clear-recents]");
+    if (clearRecents) {
+      state.recents = [];
+      saveStoredApps(RECENTS_KEY, state.recents);
+      renderDiscover();
+      toast("Son görüntülenenler temizlendi.", "info");
+      return;
+    }
     const providerFilter = target.closest("[data-provider-filter]");
     if (providerFilter) {
       const scope = providerFilter.dataset.providerFilter;
@@ -3359,12 +3582,37 @@ function bindEvents() {
 
     const selectAll = target.closest("[data-select-all]");
     if (selectAll) {
-      const visible = state.installed.filter(app =>
-        providerMatches(app, state.installedProvider)
-        && (!state.updatesOnly || app.updateAvailable),
-      );
-      visible.forEach(app => state.selection.add(selectionKey(appProvider(app), app.id)));
+      installedScopedApps().forEach(app => state.selection.add(selectionKey(appProvider(app), app.id)));
       renderInstalled();
+      return;
+    }
+
+    const copySelected = target.closest("[data-copy-selected]");
+    if (copySelected && !copySelected.disabled) {
+      const lines = selectedInstalledApps().map(app => `${app.name || app.id} (${providerLabel(app)})`);
+      copyCommand(lines.join("\n"));
+      return;
+    }
+
+    const copyInstalled = target.closest("[data-copy-installed]");
+    if (copyInstalled) {
+      const lines = sortInstalledApps(installedScopedApps(), state.installedSort)
+        .map(app => `${app.name || app.id} (${providerLabel(app)})${app.version ? ` · v${app.version}` : ""}`);
+      if (!lines.length) {
+        toast("Kopyalanacak uygulama yok.", "info");
+        return;
+      }
+      copyCommand(lines.join("\n"));
+      return;
+    }
+
+    const clearInstalledSearch = target.closest("[data-clear-installed-search]");
+    if (clearInstalledSearch) {
+      state.installedQuery = "";
+      state.installedVisibleCount = INSTALLED_PAGE_SIZE;
+      renderInstalled();
+      const input = $("[data-installed-search]");
+      if (input) input.focus();
       return;
     }
 
@@ -3419,6 +3667,15 @@ function bindEvents() {
       if (!app) return;
       if (action === "remove") askRemove(app);
       else performAction(action, app);
+      return;
+    }
+
+    const clearActivity = target.closest("[data-clear-activity]");
+    if (clearActivity) {
+      state.activityHistory = [];
+      saveActivityHistory();
+      renderSettings();
+      toast("İşlem geçmişi temizlendi.", "info");
       return;
     }
 
@@ -3669,6 +3926,9 @@ function bindEvents() {
 async function init() {
   loadSearchHistory();
   loadLastRefresh();
+  state.favorites = readStoredApps(FAVORITES_KEY);
+  state.recents = readStoredApps(RECENTS_KEY).slice(0, RECENTS_LIMIT);
+  loadActivityHistory();
   bindEvents();
   setTheme(currentTheme());
 

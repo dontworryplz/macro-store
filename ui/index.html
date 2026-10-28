@@ -33,6 +33,13 @@
           </svg>
           <span>Kategoriler</span>
         </button>
+        <button class="nav-item" type="button" data-nav="favorites">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="m12 4.2 2.4 4.9 5.4.8-3.9 3.8.9 5.4-4.8-2.5-4.8 2.5.9-5.4L4.2 9.9l5.4-.8L12 4.2Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+          </svg>
+          <span>Favoriler</span>
+          <span id="favoritesCount" class="nav-count" hidden>0</span>
+        </button>
       </nav>
 
       <div class="sidebar-grow"></div>
@@ -120,6 +127,7 @@
         <section id="searchView" class="view" hidden aria-live="polite"></section>
         <section id="categoriesView" class="view" hidden aria-live="polite"></section>
         <section id="categoryView" class="view" hidden aria-live="polite"></section>
+        <section id="favoritesView" class="view" hidden aria-live="polite"></section>
         <section id="installedView" class="view" hidden aria-live="polite"></section>
         <section id="detailView" class="view view-detail" hidden aria-live="polite"></section>
         <section id="settingsView" class="view" hidden aria-live="polite"></section>

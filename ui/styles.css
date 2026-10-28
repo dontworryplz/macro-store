@@ -451,6 +451,38 @@ input:focus-visible,
   min-width: 0;
 }
 
+.library-search {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: min(240px, 100%);
+  height: 30px;
+  padding: 0 11px;
+  border: 1px solid var(--line);
+  border-radius: 99px;
+  background: var(--surface-2);
+  color: var(--muted-2);
+}
+
+.library-search svg { width: 13px; height: 13px; flex: 0 0 auto; }
+
+.library-search input {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 10.5px;
+  outline: none;
+}
+
+.library-search:focus-within {
+  border-color: var(--line-strong);
+  color: var(--muted);
+}
+
 .provider-filters {
   display: flex;
   flex-wrap: wrap;
@@ -935,6 +967,33 @@ input:focus-visible,
   gap: 6px;
   flex: 0 0 auto;
 }
+
+.fav-btn {
+  width: 28px;
+  height: 28px;
+  color: var(--muted-2);
+}
+
+.fav-btn svg { width: 15px; height: 15px; }
+.fav-btn:hover { color: var(--accent); }
+
+.fav-btn.is-favorite {
+  border-color: var(--accent-soft);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.fav-btn.is-favorite:hover {
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  color: var(--accent);
+}
+
+.fav-btn-lg {
+  width: 34px;
+  height: 34px;
+}
+
+.fav-btn-lg svg { width: 18px; height: 18px; }
 
 /* ── Düğmeler ─────────────────────────────────────── */
 
@@ -1735,6 +1794,67 @@ html[data-theme="light"] .cat-icon circle { fill: rgba(139, 106, 53, 0.08); }
   color: var(--muted-2);
   font-size: 10.5px;
   text-align: center;
+}
+
+.activity-list {
+  display: grid;
+  gap: 1px;
+  margin: 0 0 12px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  overflow: hidden;
+  background: var(--line);
+  list-style: none;
+}
+
+.activity-row {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--surface-2);
+}
+
+.activity-row .status-dot { margin-top: 4px; }
+
+.activity-copy { min-width: 0; }
+
+.activity-title {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+}
+
+.activity-title strong {
+  color: var(--text-soft);
+  font-size: 10.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-title span {
+  color: var(--muted-2);
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.activity-copy p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.activity-row time {
+  color: var(--muted-2);
+  font-size: 9px;
+  white-space: nowrap;
 }
 
 .repo-form {
