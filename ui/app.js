@@ -25,7 +25,7 @@ const ACTIONS = {
   update: { busy: "Güncelleniyor…", verb: "güncelleniyor", done: "Güncelleme tamamlandı." },
   remove: { busy: "Kaldırılıyor…", verb: "kaldırılıyor", done: "Kaldırma tamamlandı." },
 };
-const ACTION_LABELS = { install: "Kurulum", update: "Güncelleme", remove: "Kaldırma" };
+const ACTION_LABELS = { install: "Kurulum", update: "Güncelleme", remove: "Kaldırma", prune: "Bakım" };
 const PROVIDER_NAMES = { flatpak: "Flatpak", snap: "Snap", brew: "Homebrew" };
 const PROVIDER_FILTERS = [
   { value: "all", label: "Tümü" },
@@ -453,6 +453,7 @@ const state = {
   favorites: [],
   recents: [],
   activityHistory: [],
+  libraryUsage: null,
   cliApp: null,
   cliCommands: [],
   category: null,
@@ -1607,6 +1608,14 @@ async function loadInstalled(force = false, silent = false) {
       if (!available.has(key)) state.selection.delete(key);
     }
     if (!state.installedProviderErrors.length) syncStoredFromInstalled();
+    invoke("library_usage")
+      .then(usage => {
+        state.libraryUsage = usage;
+        if (state.route.name === "installed") renderInstalled();
+      })
+      .catch(() => {
+        state.libraryUsage = null;
+      });
   } catch (err) {
     if (seq !== state.installedSeq) return;
     if (!silent) state.installedError = errText(err);
@@ -2412,6 +2421,7 @@ function renderInstalled() {
     `${state.installed.length} uygulama`,
     distributionText ? `(${distributionText})` : "",
     updates ? `${updates} güncelleme` : "",
+    state.libraryUsage?.totalBytes ? `${formatBytes(state.libraryUsage.totalBytes)} Flatpak alanı` : "",
   ].filter(Boolean).join(" · ");
   const refreshedText = state.lastRefreshed ? `Son kontrol: ${formatClock(state.lastRefreshed)}` : "";
   const selectedApps = selectedInstalledApps();
@@ -2903,6 +2913,7 @@ function renderSettings() {
         : "Eklenmeli";
   const flatpakStatusClass = typeof flatpakAvailable !== "boolean" ? "is-pending" : flatpakReady ? "is-ok" : "is-error";
   const flathubStatusClass = typeof flathubAvailable !== "boolean" ? "is-pending" : flathubReady ? "is-ok" : "is-error";
+  const pruneBusy = state.busy?.action === "prune";
   const activityBody = state.activityHistory.length
     ? `<ul class="activity-list">
         ${state.activityHistory.map(entry => `
@@ -2993,6 +3004,19 @@ function renderSettings() {
 
     <section class="settings-section">
       <div class="settings-head">
+        <h2>Bakım</h2>
+        <p>Yüklü uygulamaların artık ihtiyaç duymadığı Flatpak çalışma zamanlarını kaldırın.</p>
+      </div>
+      <div class="settings-actions">
+        <button class="btn btn-ghost" type="button" data-prune-runtimes${pruneBusy ? " disabled" : ""}>
+          ${pruneBusy ? "Temizleniyor…" : "Kullanılmayan çalışma zamanlarını temizle"}
+        </button>
+        ${state.libraryUsage?.totalBytes ? `<span class="source-note">${escapeHtml(formatBytes(state.libraryUsage.totalBytes))} Flatpak alanı kullanılıyor</span>` : ""}
+      </div>
+    </section>
+
+    <section class="settings-section">
+      <div class="settings-head">
         <h2>Mağaza bilgileri</h2>
       </div>
       <div class="about-lines">
@@ -3050,6 +3074,29 @@ function applyAction(action, provider, id) {
     }
   }
   updateInstalledCount();
+}
+
+async function runPruneRuntimes() {
+  if (state.busy) return;
+  state.busy = { id: "", provider: "flatpak", action: "prune", name: "Çalışma zamanları" };
+  showActivity("Kullanılmayan çalışma zamanları temizleniyor…");
+  renderSettings();
+  try {
+    const outcome = await invoke("prune_unused_runtimes");
+    if (!outcome?.success) throw new Error(outcome?.message || "Temizlik tamamlanamadı.");
+    state.libraryUsage = null;
+    recordActivity({ action: "prune", name: "Çalışma zamanları", ok: true, message: outcome.message || "" });
+    toast(outcome.message || "Temizlik tamamlandı.", "success");
+    if (state.installedLoaded) await loadInstalled(true, true);
+  } catch (err) {
+    recordActivity({ action: "prune", name: "Çalışma zamanları", ok: false, message: errText(err) });
+    toast(errText(err), "error");
+  } finally {
+    state.busy = null;
+    hideActivity();
+    if (state.route.name === "settings") renderSettings();
+    else renderRoute();
+  }
 }
 
 async function performAction(action, app) {
@@ -3716,6 +3763,17 @@ function bindEvents() {
       if (!app) return;
       if (action === "remove") askRemove(app);
       else performAction(action, app);
+      return;
+    }
+
+    const pruneButton = target.closest("[data-prune-runtimes]");
+    if (pruneButton && !pruneButton.disabled) {
+      askConfirm({
+        title: "Çalışma zamanlarını temizle",
+        text: "Hiçbir uygulamanın kullanmadığı Flatpak çalışma zamanları kaldırılacak. Yüklü uygulamalar etkilenmez.",
+        label: "Temizle",
+        onConfirm: () => runPruneRuntimes(),
+      });
       return;
     }
 
@@ -4681,6 +4739,26 @@ async function mockInvoke(command, args = {}) {
     return {
       apps: MOCK.setup.flatpak ? mockInstalledApps() : [],
       providerErrors: [],
+    };
+  }
+
+  if (command === "library_usage") {
+    const apps = MOCK.setup.flatpak ? mockInstalledApps() : [];
+    return {
+      totalBytes: apps.length * 120 * 1024 * 1024,
+      apps: apps.length,
+    };
+  }
+
+  if (command === "prune_unused_runtimes") {
+    await sleep(400);
+    return {
+      success: true,
+      code: null,
+      message: "Kullanılmayan çalışma zamanları temizlendi.",
+      appId: "",
+      action: "prune",
+      manager: "Flatpak",
     };
   }
 

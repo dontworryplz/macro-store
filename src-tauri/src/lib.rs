@@ -325,6 +325,7 @@ struct FlatpakInstalled {
     name: String,
     summary: String,
     version: String,
+    installed_size: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -913,7 +914,7 @@ fn read_flatpak_user_list() -> Vec<FlatpakInstalled> {
             "list",
             "--user",
             "--app",
-            "--columns=application,name,description,version",
+            "--columns=application,name,description,version,size",
         ],
     ) else {
         return Vec::new();
@@ -922,6 +923,25 @@ fn read_flatpak_user_list() -> Vec<FlatpakInstalled> {
         return Vec::new();
     }
     parse_flatpak_user_list(&output.stdout)
+}
+
+fn parse_flatpak_size(value: &str) -> Option<u64> {
+    let text = value.trim().replace(',', ".");
+    let mut parts = text.split_whitespace();
+    let amount = parts.next()?.parse::<f64>().ok()?;
+    if !amount.is_finite() || amount < 0.0 {
+        return None;
+    }
+    let unit = parts.next().unwrap_or("bytes").to_ascii_lowercase();
+    let factor = match unit.as_str() {
+        "b" | "byte" | "bytes" => 1.0,
+        "kb" | "kib" | "k" => 1024.0,
+        "mb" | "mib" | "m" => 1024.0 * 1024.0,
+        "gb" | "gib" | "g" => 1024.0 * 1024.0 * 1024.0,
+        "tb" | "tib" | "t" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        _ => return None,
+    };
+    Some((amount * factor).round() as u64)
 }
 
 fn parse_flatpak_user_list(text: &str) -> Vec<FlatpakInstalled> {
@@ -937,6 +957,7 @@ fn parse_flatpak_user_list(text: &str) -> Vec<FlatpakInstalled> {
             name: fields.next().unwrap_or(app_id).trim().to_string(),
             summary: truncate_chars(fields.next().unwrap_or("").trim(), 500),
             version: fields.next().unwrap_or("").trim().to_string(),
+            installed_size: fields.next().and_then(parse_flatpak_size),
         });
     }
     apps.sort_by_key(|app| app.name.to_lowercase());
@@ -2297,6 +2318,82 @@ async fn list_installed_apps() -> InstalledAppsResponse {
     installed_apps_response([("flatpak", flatpak), ("snap", snap), ("brew", brew)])
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LibraryUsage {
+    total_bytes: u64,
+    apps: usize,
+}
+
+#[tauri::command]
+async fn library_usage() -> Result<LibraryUsage, String> {
+    tokio::task::spawn_blocking(|| {
+        let snapshot = flatpak_snapshot();
+        LibraryUsage {
+            total_bytes: snapshot
+                .apps
+                .iter()
+                .filter_map(|app| app.installed_size)
+                .sum(),
+            apps: snapshot.apps.len(),
+        }
+    })
+    .await
+    .map_err(|error| format!("Kitaplık boyutu okunamadı: {error}"))
+}
+
+#[tauri::command]
+async fn prune_unused_runtimes(app: AppHandle) -> Result<OperationOutcome, String> {
+    if SETTING_UP.load(Ordering::SeqCst) {
+        return Err(
+            "Sistem hazırlığı sürüyor. Lütfen tamamlandıktan sonra yeniden deneyin.".to_string(),
+        );
+    }
+    if OPERATING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("Zaten devam eden bir işlem var.".to_string());
+    }
+    let _lock = OperationLock;
+    let output = tokio::task::spawn_blocking(|| {
+        run_capture(
+            "flatpak",
+            &["uninstall", "--user", "--unused", "--noninteractive"],
+        )
+    })
+    .await
+    .map_err(|error| format!("Temizlik arka planda tamamlanamadı: {error}"))??;
+
+    let message = if output.success {
+        "Kullanılmayan çalışma zamanları temizlendi.".to_string()
+    } else {
+        failure_message("flatpak uninstall", &output)
+    };
+    emit_log(
+        &app,
+        if output.success {
+            format!("✓ {message}")
+        } else {
+            format!("✕ {message}")
+        },
+        if output.success { "info" } else { "error" },
+    );
+    if output.success {
+        invalidate_flatpak_cache();
+    }
+    let outcome = OperationOutcome {
+        success: output.success,
+        code: None,
+        message,
+        app_id: String::new(),
+        action: "prune".to_string(),
+        manager: "Flatpak".to_string(),
+    };
+    let _ = app.emit("app-finished", outcome.clone());
+    Ok(outcome)
+}
+
 #[tauri::command]
 fn refresh_provider_caches() {
     invalidate_flatpak_cache();
@@ -2821,6 +2918,8 @@ pub fn run() {
             get_app_detail,
             get_app_permissions,
             list_installed_apps,
+            library_usage,
+            prune_unused_runtimes,
             refresh_provider_caches,
             list_flatpak_remotes,
             add_flatpak_remote,
@@ -2847,6 +2946,31 @@ mod tests {
         assert_eq!(apps[0].version, "1.0");
         assert_eq!(apps[1].summary, "Editor for notes");
         assert_eq!(apps[1].version, "2.4");
+    }
+
+    #[test]
+    fn flatpak_sizes_parse_units_and_locale_separators() {
+        assert_eq!(parse_flatpak_size("1.2 MB"), Some(1_258_291));
+        assert_eq!(parse_flatpak_size("1,2 MB"), Some(1_258_291));
+        assert_eq!(parse_flatpak_size("512 kB"), Some(524_288));
+        assert_eq!(parse_flatpak_size("2 GB"), Some(2_147_483_648));
+        assert_eq!(parse_flatpak_size("0 bytes"), Some(0));
+        assert_eq!(parse_flatpak_size(""), None);
+        assert_eq!(parse_flatpak_size("bilinmiyor"), None);
+        assert_eq!(parse_flatpak_size("-1 MB"), None);
+    }
+
+    #[test]
+    fn installed_rows_carry_sizes_and_default_to_none() {
+        let apps = parse_flatpak_user_list(
+            "Application	Name	Description	Version	Size
+org.example.Alpha	Alpha		1.0	1.2 MB
+org.example.Beta	Beta		2.0	
+",
+        );
+        assert_eq!(apps.len(), 2);
+        assert_eq!(apps[0].installed_size, Some(1_258_291));
+        assert_eq!(apps[1].installed_size, None);
     }
 
     #[test]
