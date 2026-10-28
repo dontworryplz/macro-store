@@ -15,6 +15,7 @@ const RECENTS_KEY = "macro-recents";
 const RECENTS_LIMIT = 5;
 const ACTIVITY_KEY = "macro-activity";
 const ACTIVITY_LIMIT = 25;
+const LIBRARY_PREFS_KEY = "macro-library-prefs";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -497,6 +498,7 @@ const els = {
   logButton: $("#logButton"),
   shortcutsButton: $("#shortcutsButton"),
   installedCount: $("#installedCount"),
+  updatesCount: $("#updatesCount"),
   favoritesCount: $("#favoritesCount"),
   statusDot: $("#statusDot"),
   statusText: $("#statusText"),
@@ -1439,8 +1441,12 @@ function updateStatus() {
 
 function updateInstalledCount() {
   const count = state.installed.length;
+  const updates = state.installed.filter(app => app.updateAvailable).length;
   els.installedCount.hidden = !state.installedLoaded || count === 0;
   els.installedCount.textContent = String(count);
+  els.updatesCount.hidden = !state.installedLoaded || updates === 0;
+  els.updatesCount.textContent = String(updates);
+  els.updatesCount.title = `${updates} güncelleme bekliyor`;
 }
 
 function updateFavoritesCount() {
@@ -1657,6 +1663,32 @@ function loadLastRefresh() {
     if (Number.isFinite(value) && value > 0) state.lastRefreshed = value;
   } catch {
     state.lastRefreshed = null;
+  }
+}
+
+function loadLibraryPrefs() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LIBRARY_PREFS_KEY) || "{}");
+    if (!raw || typeof raw !== "object") return;
+    if (PROVIDER_FILTERS.some(option => option.value === raw.provider)) {
+      state.installedProvider = raw.provider;
+    }
+    if (INSTALLED_SORTS.some(option => option.value === raw.sort)) {
+      state.installedSort = raw.sort;
+    }
+  } catch {
+    /* Tercihler okunamazsa varsayılanlar kullanılır. */
+  }
+}
+
+function saveLibraryPrefs() {
+  try {
+    localStorage.setItem(LIBRARY_PREFS_KEY, JSON.stringify({
+      provider: state.installedProvider,
+      sort: state.installedSort,
+    }));
+  } catch {
+    /* Depolama kapalıysa tercih yalnızca oturum boyunca tutulur. */
   }
 }
 
@@ -2478,6 +2510,7 @@ function renderInstalled() {
         ${providerFilterHtml("installed", provider, countPool)}
         ${state.selectionMode ? "" : sortFilterHtml()}
         ${!state.selectionMode ? `<button class="chip" type="button" data-copy-installed>Listeyi kopyala</button>` : ""}
+        ${!state.selectionMode && pending ? `<button class="chip" type="button" data-copy-updates>Güncelleme komutlarını kopyala</button>` : ""}
         <button class="chip" type="button" data-selection-toggle aria-pressed="${state.selectionMode}">
           ${state.selectionMode ? "Seçimi kapat" : "Seç"}
         </button>
@@ -3558,6 +3591,7 @@ function bindEvents() {
       } else if (scope === "installed") {
         state.installedProvider = provider;
         state.installedVisibleCount = INSTALLED_PAGE_SIZE;
+        saveLibraryPrefs();
         renderInstalled();
       }
       return;
@@ -3606,6 +3640,20 @@ function bindEvents() {
       return;
     }
 
+    const copyUpdates = target.closest("[data-copy-updates]");
+    if (copyUpdates) {
+      const lines = state.installed
+        .filter(app => app.updateAvailable && providerMatches(app, state.installedProvider))
+        .map(app => cliCommandsFor(app).find(item => item.label === "Güncelle")?.command || "")
+        .filter(Boolean);
+      if (!lines.length) {
+        toast("Kopyalanacak güncelleme komutu yok.", "info");
+        return;
+      }
+      copyCommand(lines.join("\n"));
+      return;
+    }
+
     const clearInstalledSearch = target.closest("[data-clear-installed-search]");
     if (clearInstalledSearch) {
       state.installedQuery = "";
@@ -3633,6 +3681,7 @@ function bindEvents() {
       const sort = sortFilter.dataset.installedSort;
       if (!INSTALLED_SORTS.some(option => option.value === sort)) return;
       state.installedSort = sort;
+      saveLibraryPrefs();
       renderInstalled();
       return;
     }
@@ -3870,6 +3919,21 @@ function bindEvents() {
       return;
     }
 
+    const plainKey = !event.metaKey && !event.ctrlKey && !event.altKey;
+    if (plainKey && !openModalEl && !isTypingTarget(event.target)) {
+      const key = event.key.toLowerCase();
+      if (key === "r") {
+        event.preventDefault();
+        refreshCurrent();
+        return;
+      }
+      if (key === "f" && state.route.name === "detail" && state.detail?.app) {
+        event.preventDefault();
+        toggleFavorite(state.detail.app);
+        return;
+      }
+    }
+
     if ((event.key === "Enter" || event.key === " ") && !isTypingTarget(event.target)) {
       const focusTarget = event.target instanceof Element ? event.target : null;
       const openable = focusTarget?.closest("[data-open-app], [data-category], [data-shot]");
@@ -3929,6 +3993,7 @@ async function init() {
   state.favorites = readStoredApps(FAVORITES_KEY);
   state.recents = readStoredApps(RECENTS_KEY).slice(0, RECENTS_LIMIT);
   loadActivityHistory();
+  loadLibraryPrefs();
   bindEvents();
   setTheme(currentTheme());
 

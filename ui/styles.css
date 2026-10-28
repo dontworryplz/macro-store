@@ -233,6 +233,11 @@ input:focus-visible,
   flex: 0 0 auto;
 }
 
+.nav-count-update {
+  background: var(--accent);
+  color: var(--bg);
+}
+
 .sidebar-status {
   display: flex;
   align-items: center;
