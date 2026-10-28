@@ -34,6 +34,12 @@ kurmak için çağrılır.
   toplu işlemler onay ister ve iptal edilebilir.
 - Kitaplık başlığında sağlayıcı dağılımı ve son kontrol saati gösterilir.
 - Arama geçmişi yerel olarak saklanır; son aramalar arama kutusunda önerilir.
+- Favoriler ve son görüntülenen uygulamalar cihazda saklanır; Keşfet ekranından
+  ve kenar çubuğundan erişilebilir.
+- Kitaplıkta ada, kimliğe, geliştiriciye ve sağlayıcıya göre hızlı arama;
+  görünen liste ya da seçilen uygulamalar panoya kopyalanabilir.
+- Seçenekler ekranında son kurulum, güncelleme ve kaldırma işlemlerinin
+  cihazda tutulan geçmişi listelenir.
 - Flatpak uygulama izinleri ve son sürüm geçmişi ayrıntı ekranında gösterilir.
 - `?` / `F1` ile klavye kısayolları penceresi açılır.
 - Snap izleme kanalı ve Homebrew sabitlenmiş formula durumu uygulama
