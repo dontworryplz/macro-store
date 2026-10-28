@@ -1,0 +1,141 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Build and publish Linux packages
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@1.90.0
+        with:
+          components: rustfmt, clippy
+
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Validate release tag and versions
+        working-directory: src-tauri
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          package_version="$(cargo metadata --locked --no-deps --format-version 1 | jq -er '.packages[] | select(.name == "mss") | .version')"
+          config_version="$(jq -er '.version' tauri.conf.json)"
+          if [[ "$config_version" != "$package_version" ]]; then
+            echo "::error::Cargo package version and Tauri configuration version do not match"
+            exit 1
+          fi
+          expected_tag="v${package_version}"
+          if [[ "$RELEASE_TAG" != "$expected_tag" ]]; then
+            echo "::error::Release tag does not match the expected package version tag"
+            exit 1
+          fi
+
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            libgtk-3-dev \
+            libssl-dev \
+            librsvg2-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            rpm \
+            wget
+
+      - name: Record Rust compiler version
+        id: rust
+        run: echo "version=$(rustc --version | cut -d ' ' -f 2)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ steps.rust.outputs.version }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-cargo-${{ steps.rust.outputs.version }}-
+
+
+      - name: Check JavaScript syntax
+        run: for file in ui/*.js; do node --check "$file"; done
+
+      - name: Check Rust formatting
+        working-directory: src-tauri
+        run: cargo fmt --all -- --check
+
+      - name: Check Rust targets
+        working-directory: src-tauri
+        run: cargo check --locked --all-targets
+
+      - name: Test Rust targets
+        working-directory: src-tauri
+        run: cargo test --locked --all-targets
+
+      - name: Lint Rust targets
+        working-directory: src-tauri
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2.0.0" --locked
+
+      - name: Build Debian, RPM, and AppImage packages
+        working-directory: src-tauri
+        run: cargo tauri build --ci --bundles deb,rpm,appimage
+
+      - name: Collect packages and checksums
+        working-directory: src-tauri
+        run: |
+          shopt -s nullglob
+          deb_files=(target/release/bundle/deb/*.deb)
+          rpm_files=(target/release/bundle/rpm/*.rpm)
+          appimage_files=(target/release/bundle/appimage/*.AppImage)
+          if (( ${#deb_files[@]} == 0 )); then
+            echo "No .deb package was produced" >&2
+            exit 1
+          fi
+          if (( ${#rpm_files[@]} == 0 )); then
+            echo "No .rpm package was produced" >&2
+            exit 1
+          fi
+          if (( ${#appimage_files[@]} == 0 )); then
+            echo "No AppImage package was produced" >&2
+            exit 1
+          fi
+          mkdir -p ../release-assets
+          cp "${deb_files[@]}" "${rpm_files[@]}" "${appimage_files[@]}" ../release-assets/
+          (
+            cd ../release-assets
+            sha256sum -- *.deb *.rpm *.AppImage > SHA256SUMS
+          )
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ github.token }}
+          files: release-assets/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true

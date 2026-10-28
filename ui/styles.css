@@ -443,6 +443,22 @@ input:focus-visible,
   font-size: 10.5px;
   white-space: nowrap;
 }
+.view-tools {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.provider-filters {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  max-width: 100%;
+}
+
 
 .view-sub {
   margin: 6px 0 0;
@@ -1732,28 +1748,7 @@ html[data-theme="light"] .cat-icon circle { fill: rgba(139, 106, 53, 0.08); }
 
 .repo-form .btn { height: 34px; }
 
-.disabled-source {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  padding: 12px;
-  border: 1px dashed var(--line);
-  border-radius: 11px;
-  opacity: 0.72;
-}
 
-.disabled-source .repo-mark { color: var(--muted-2); }
-
-.soon-badge {
-  margin-left: auto;
-  padding: 2px 7px;
-  border: 1px solid var(--line);
-  border-radius: 99px;
-  color: var(--muted-2);
-  font-size: 8.5px;
-  font-weight: 600;
-  white-space: nowrap;
-}
 
 .about-lines {
   display: flex;
@@ -2478,6 +2473,8 @@ html[data-theme="light"] .sk {
   .main { padding: 20px 18px 78px; }
   .view-head { align-items: flex-start; flex-direction: column; gap: 5px; }
   .view-note { white-space: normal; }
+  .view-tools { align-items: flex-start; width: 100%; }
+  .provider-filters { justify-content: flex-start; }
   .hero-card { min-height: 330px; }
   .hero-content { padding: 22px; }
   .hero-identity .app-icon { width: 52px; height: 52px; }

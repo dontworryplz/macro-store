@@ -1,4 +1,4 @@
-/* Macro Store — Flathub tabanlı mağaza arayüzü.
+/* Macro Store — Linux uygulama mağazası arayüzü.
    Framework ya da derleme adımı yok; düşük bellek kullanımı için saf JavaScript. */
 
 const TAURI = window.__TAURI__;
@@ -16,6 +16,13 @@ const ACTIONS = {
   update: { busy: "Güncelleniyor…", verb: "güncelleniyor", done: "Güncelleme tamamlandı." },
   remove: { busy: "Kaldırılıyor…", verb: "kaldırılıyor", done: "Kaldırma tamamlandı." },
 };
+const PROVIDER_NAMES = { flatpak: "Flatpak", snap: "Snap", brew: "Homebrew" };
+const PROVIDER_FILTERS = [
+  { value: "all", label: "Tümü" },
+  { value: "flatpak", label: "Flatpak" },
+  { value: "snap", label: "Snap" },
+  { value: "brew", label: "Homebrew" },
+];
 
 const FALLBACK_ICON = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(
   `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" fill="none">
@@ -104,6 +111,66 @@ const CATEGORY_LIST = [
 ];
 
 const CATEGORY_MAP = Object.fromEntries(CATEGORY_LIST.map(category => [category.slug, category]));
+function appProvider(app) {
+  return app?.provider || "flatpak";
+}
+
+function providerName(provider) {
+  return PROVIDER_NAMES[provider] || String(provider || "Flatpak");
+}
+
+function packageTypeName(app) {
+  if (appProvider(app) !== "brew" || !app?.packageType) return "";
+  const value = String(app.packageType).trim();
+  if (!value) return "";
+  const normalized = value.toLowerCase();
+  if (normalized === "formula") return "Formula";
+  if (normalized === "cask") return "Cask";
+  return value;
+}
+
+function providerLabel(app) {
+  const name = providerName(appProvider(app));
+  const packageType = packageTypeName(app);
+  return packageType ? `${name} · ${packageType}` : name;
+}
+
+function providerManagerLabel(app) {
+  const provider = appProvider(app);
+  if (provider === "flatpak") return "Flatpak · kullanıcı kapsamı";
+  if (provider === "snap") return "Snap · sistem kapsamı";
+  return providerLabel(app);
+}
+
+function providerActionLabel(action, app) {
+  const verbs = { install: "kur", update: "güncelle", remove: "kaldır" };
+  const provider = appProvider(app);
+  const scope = provider === "flatpak" ? " (kullanıcı kapsamı)" : provider === "snap" ? " (sistem kapsamı)" : "";
+  return `${providerName(provider)} ile ${verbs[action] || "işlem yap"}${scope}`;
+}
+
+function providerInstallInfo(app) {
+  const provider = appProvider(app);
+  if (provider === "flatpak") return "Flatpak kullanıcı kapsamında kurulur";
+  if (provider === "snap") return "Snap sistem kapsamında kurulur; yetkilendirme istenebilir";
+  return "Homebrew paket yöneticisiyle yönetilir";
+}
+
+function sameApp(app, provider, id) {
+  return Boolean(app && app.id === id && appProvider(app) === provider);
+}
+
+function providerFilterHtml(scope, selected) {
+  const label = scope === "search"
+    ? "Arama sonuçlarını sağlayıcıya göre filtrele"
+    : "Yüklü uygulamaları sağlayıcıya göre filtrele";
+  return `<div class="provider-filters" role="group" aria-label="${attr(label)}">
+    ${PROVIDER_FILTERS.map(option => `
+      <button class="chip" type="button" data-provider-filter="${scope}" data-provider="${option.value}" aria-pressed="${selected === option.value}">
+        ${option.label}
+      </button>`).join("")}
+  </div>`;
+}
 
 const state = {
   route: { name: "discover" },
@@ -114,6 +181,7 @@ const state = {
   searching: false,
   searchError: "",
   searchSeq: 0,
+  searchProvider: "all",
   discover: null,
   discoverLoading: false,
   discoverError: "",
@@ -124,6 +192,7 @@ const state = {
   installedError: "",
   installedSeq: 0,
   updatesOnly: false,
+  installedProvider: "all",
   category: null,
   categoryLoading: false,
   categoryError: "",
@@ -353,7 +422,7 @@ function appTagsHtml(app, context = "") {
 }
 
 function metaParts(app) {
-  const parts = [];
+  const parts = [providerManagerLabel(app)];
   if (app.developer) parts.push(app.developer);
   if (app.category) parts.push(categoryName(app.category));
   if (app.installed && app.version) parts.push(`v${app.version}`);
@@ -366,29 +435,39 @@ function appMetaHtml(app) {
   if (!parts.length) return "";
   return `<p class="app-meta">${parts.map(escapeHtml).join('<span class="dot">·</span>')}</p>`;
 }
+function providerMatches(app, selected) {
+  return selected === "all" || appProvider(app) === selected;
+}
+
+function matchesApps(provider, id) {
+  return app => sameApp(app, provider, id);
+}
+
 
 function actionButtonsHtml(app, { large = false, hero = false, allowRemove = true } = {}) {
   const size = large ? "btn-lg" : "btn-sm";
   const primary = hero ? `btn btn-hero-primary ${size}` : `btn btn-primary ${size}`;
   const ghost = hero ? `btn btn-hero-ghost ${size}` : `btn btn-ghost ${size}`;
   const id = attr(app.id);
+  const provider = appProvider(app);
   const locked = state.busy ? " disabled" : "";
+  const actionAttrs = action => `data-action="${action}" data-id="${id}" data-provider="${attr(provider)}" aria-label="${attr(providerActionLabel(action, app))}"`;
 
-  if (state.busy && state.busy.id === app.id) {
+  if (state.busy && sameApp(state.busy, provider, app.id)) {
     const label = ACTIONS[state.busy.action]?.busy || "İşleniyor…";
-    return `<button class="${primary}" type="button" disabled><span class="spinner"></span>${label}</button>`;
+    return `<button class="${primary}" type="button" disabled aria-label="${attr(providerActionLabel(state.busy.action, app))}"><span class="spinner"></span>${label}</button>`;
   }
 
   if (!app.installed) {
-    return `<button class="${primary}" type="button" data-action="install" data-id="${id}"${locked}>Kur</button>`;
+    return `<button class="${primary}" type="button" ${actionAttrs("install")}${locked}>Kur</button>`;
   }
 
   const buttons = [];
   if (app.updateAvailable) {
-    buttons.push(`<button class="${primary}" type="button" data-action="update" data-id="${id}"${locked}>Güncelle</button>`);
+    buttons.push(`<button class="${primary}" type="button" ${actionAttrs("update")}${locked}>Güncelle</button>`);
   }
   if (allowRemove) {
-    buttons.push(`<button class="${ghost}" type="button" data-action="remove" data-id="${id}"${locked}>Kaldır</button>`);
+    buttons.push(`<button class="${ghost}" type="button" ${actionAttrs("remove")}${locked}>Kaldır</button>`);
   }
   return buttons.join("");
 }
@@ -396,7 +475,7 @@ function actionButtonsHtml(app, { large = false, hero = false, allowRemove = tru
 function appRowHtml(app, context = "search") {
   const summary = String(app.summary || "").trim();
   return `
-    <article class="app-row" data-open-app="${attr(app.id)}" tabindex="0" role="link" aria-label="${attr(app.name || app.id)} ayrıntıları">
+    <article class="app-row" data-open-app="${attr(app.id)}" data-provider="${attr(appProvider(app))}" tabindex="0" role="link" aria-label="${attr(app.name || app.id)} (${attr(providerLabel(app))}) ayrıntıları">
       ${appIconHtml(app)}
       <div class="app-body">
         <div class="app-line">
@@ -419,7 +498,7 @@ function appTileHtml(app) {
       ? '<span class="tile-state">Yüklü</span>'
       : "";
   return `
-    <article class="app-tile" data-open-app="${attr(app.id)}" tabindex="0" role="link" aria-label="${attr(app.name || app.id)} ayrıntıları">
+    <article class="app-tile" data-open-app="${attr(app.id)}" data-provider="${attr(appProvider(app))}" tabindex="0" role="link" aria-label="${attr(app.name || app.id)} (${attr(providerLabel(app))}) ayrıntıları">
       <div class="tile-top">
         ${appIconHtml(app)}
         ${stateTag}
@@ -427,7 +506,8 @@ function appTileHtml(app) {
       <h3>${escapeHtml(app.name || app.id)}</h3>
       ${summary ? `<p>${escapeHtml(summary)}</p>` : ""}
       <div class="tile-foot">
-        <span>${escapeHtml(developer || "Flathub")}</span>
+        <span>${escapeHtml(providerManagerLabel(app))}</span>
+        ${developer ? '<span class="dot">·</span><span>' + escapeHtml(developer) + "</span>" : ""}
         ${app.monthlyInstalls ? '<span class="dot">·</span><span>' + escapeHtml(`${formatCount(app.monthlyInstalls)} kurulum`) + "</span>" : ""}
       </div>
     </article>`;
@@ -435,8 +515,11 @@ function appTileHtml(app) {
 
 function pickCardHtml(app) {
   const hero = imageUrl(app.heroImage);
+  const detail = [providerManagerLabel(app), app.developer || (app.category ? categoryName(app.category) : "")]
+    .filter(Boolean)
+    .join(" · ");
   return `
-    <article class="pick-card" data-open-app="${attr(app.id)}" tabindex="0" role="link" aria-label="${attr(app.name || app.id)} ayrıntıları">
+    <article class="pick-card" data-open-app="${attr(app.id)}" data-provider="${attr(appProvider(app))}" tabindex="0" role="link" aria-label="${attr(app.name || app.id)} (${attr(providerLabel(app))}) ayrıntıları">
       <div class="pick-media${hero ? "" : " is-placeholder"}">
         ${hero ? `<img src="${hero}" alt="" loading="lazy" />` : ""}
       </div>
@@ -444,7 +527,7 @@ function pickCardHtml(app) {
         ${appIconHtml(app)}
         <div class="pick-text">
           <h3>${escapeHtml(app.name || app.id)}</h3>
-          <p>${escapeHtml(app.developer || (app.category ? categoryName(app.category) : "Flathub"))}</p>
+          <p>${escapeHtml(detail)}</p>
         </div>
       </div>
     </article>`;
@@ -517,6 +600,7 @@ function setupIsReady(status = state.setup.status) {
 function syncStoreInfoFromSetup(status) {
   if (!status) return;
   state.storeInfo = {
+    ...(state.storeInfo || {}),
     flatpakAvailable: Boolean(status.flatpakAvailable),
     flatpakVersion: status.flatpakVersion || null,
     flathubAvailable: Boolean(status.flathubAvailable),
@@ -534,8 +618,8 @@ function storeNoticeHtml() {
   if (flatpakAvailable && userFlathub) return "";
 
   const message = flatpakAvailable
-    ? "<strong>Flathub kullanıcı deposu eksik.</strong> Uygulama kurulumu için Flathub deposunu ekleyin."
-    : "<strong>Flatpak bulunamadı.</strong> Macro Store uygulamaları Flatpak ile kurar. Kurulum sihirbazı dağıtımınıza uygun paketi hazırlayabilir.";
+    ? "<strong>Flathub kullanıcı deposu eksik.</strong> Flathub kataloğundaki Flatpak uygulamaları için bu depoyu ekleyin."
+    : "<strong>Flatpak bulunamadı.</strong> Flathub kataloğundaki Flatpak uygulamalarını kurmak için Flatpak gerekir.";
   const label = flatpakAvailable ? "Depoyu ekle" : "Flatpak kur";
 
   return `
@@ -556,6 +640,17 @@ function setupFactHtml(ok, label, value) {
         <span>${escapeHtml(label)}</span>
         <strong>${escapeHtml(value)}</strong>
       </span>
+    </div>`;
+}
+function managerStatusRowHtml(label, available) {
+  const known = typeof available === "boolean";
+  const status = known ? (available ? "is-ok" : "is-error") : "is-pending";
+  const text = known ? (available ? "Algılandı" : "Algılanmadı") : "Durum bilinmiyor";
+  return `
+    <div class="system-row">
+      <span class="status-dot ${status}" aria-hidden="true"></span>
+      <span>${escapeHtml(label)}</span>
+      <strong>${text}</strong>
     </div>`;
 }
 
@@ -771,8 +866,8 @@ function renderSetup() {
         <div>
           <h3>Flatpak kurulu değil</h3>
           <p>${supported
-            ? "Macro Store uygulamaları Flatpak ile kurar. Dağıtımınıza uygun paket yöneticisiyle Flatpak’ı kurup Flathub deposunu hazırlayabiliriz."
-            : "Macro Store uygulamaları Flatpak ile kurar. Bu dağıtımda otomatik kurulum desteklenmiyor; aşağıdaki komutları terminalde çalıştırabilirsiniz."}</p>
+            ? "Macro Store, Flatpak uygulamalarını kullanıcı kapsamıyla kurar. Dağıtımınıza uygun paket yöneticisiyle Flatpak’ı kurup Flathub deposunu hazırlayabiliriz."
+            : "Macro Store, Flatpak uygulamalarını kullanıcı kapsamıyla kurar. Bu dağıtımda otomatik kurulum desteklenmiyor; aşağıdaki komutları terminalde çalıştırabilirsiniz."}</p>
         </div>
       </div>
       ${setupFactsHtml(status)}
@@ -1007,13 +1102,13 @@ function updateInstalledCount() {
 function updatePageTitle() {
   const route = state.route;
   if (route.name === "detail" && state.detail?.app?.name) {
-    document.title = `${state.detail.app.name} — Macro Store`;
+    document.title = `${state.detail.app.name} (${providerName(appProvider(state.detail.app))}) — Macro Store`;
   } else if (route.name === "category" && CATEGORY_MAP[route.slug]) {
     document.title = `${CATEGORY_MAP[route.slug].name} — Macro Store`;
   } else if (route.name === "search" && state.query) {
     document.title = state.query.length >= 2 ? `“${state.query}” — Macro Store` : "Arama — Macro Store";
   } else {
-    document.title = "Macro Store — Flathub Mağazası";
+    document.title = "Macro Store — Linux Uygulama Mağazası";
   }
 }
 
@@ -1049,7 +1144,8 @@ function navigate(route, { root = false, replace = false } = {}) {
   const previous = state.route;
   const same = route.name === previous.name
     && (route.slug || "") === (previous.slug || "")
-    && (route.id || "") === (previous.id || "");
+    && (route.id || "") === (previous.id || "")
+    && (route.name !== "detail" || appProvider(route) === appProvider(previous));
 
   if (root) {
     state.stack = [route];
@@ -1171,6 +1267,7 @@ function resetSearch({ goDiscover = false, focus = false } = {}) {
 async function runSearch(rawQuery) {
   const query = String(rawQuery ?? "").trim();
   cancelPendingSearch();
+  const seq = ++state.searchSeq;
 
   if (!query) {
     resetSearch({ goDiscover: state.route.name === "search" });
@@ -1193,7 +1290,6 @@ async function runSearch(rawQuery) {
   state.searching = true;
   state.searchError = "";
   els.searchInput.value = query;
-  const seq = ++state.searchSeq;
 
   if (state.route.name !== "search") navigate({ name: "search" });
   else renderSearch();
@@ -1238,11 +1334,12 @@ async function loadCategory(slug, page = 1, reset = false) {
     const data = await invoke("get_category", { slug, page });
     if (seq !== state.categorySeq) return;
     const previousApps = page > 1 && sameCategory ? state.category.apps : [];
-    const seen = new Set(previousApps.map(app => app.id));
+    const seen = new Set(previousApps.map(app => JSON.stringify([appProvider(app), app.id])));
     const merged = [...previousApps];
     for (const app of data?.apps || []) {
-      if (!seen.has(app.id)) {
-        seen.add(app.id);
+      const key = JSON.stringify([appProvider(app), app.id]);
+      if (!seen.has(key)) {
+        seen.add(key);
         merged.push(app);
       }
     }
@@ -1266,20 +1363,20 @@ async function loadCategory(slug, page = 1, reset = false) {
   }
 }
 
-async function loadDetail(id, force = false) {
-  if (!force && state.detail?.app?.id === id) {
+async function loadDetail(id, provider = "flatpak", force = false) {
+  if (!force && sameApp(state.detail?.app, provider, id)) {
     renderIf("detail", renderDetail);
     return;
   }
   const seq = ++state.detailSeq;
-  const sameApp = state.detail?.app?.id === id;
-  if (!sameApp) state.detail = null;
+  const sameDetail = sameApp(state.detail?.app, provider, id);
+  if (!sameDetail) state.detail = null;
   state.detailLoading = true;
   state.detailError = "";
   renderIf("detail", renderDetail);
 
   try {
-    const data = await invoke("get_app_detail", { appId: id });
+    const data = await invoke("get_app_detail", { appId: id, provider });
     if (seq !== state.detailSeq) return;
     state.detail = data;
   } catch (err) {
@@ -1361,7 +1458,7 @@ async function refreshCurrent() {
     else if (route.name === "search" && state.query) await runSearch(state.query);
     else if (route.name === "installed") await loadInstalled(true);
     else if (route.name === "category") await loadCategory(route.slug, 1, true);
-    else if (route.name === "detail") await loadDetail(route.id, true);
+    else if (route.name === "detail") await loadDetail(route.id, appProvider(route), true);
     else if (route.name === "settings") {
       await loadStoreInfo();
       await loadRemotes(true);
@@ -1419,7 +1516,7 @@ function renderRoute() {
 
 function heroHtml(app) {
   const hero = imageUrl(app.heroImage);
-  const developer = app.developer ? escapeHtml(app.developer) : "Flathub topluluğu";
+  const developer = [app.developer, providerLabel(app)].filter(Boolean).join(" · ");
   const summary = String(app.summary || "").trim();
   const installed = app.installed;
   const secondary = !installed
@@ -1429,7 +1526,7 @@ function heroHtml(app) {
       : "";
 
   return `
-    <article class="hero-card" data-open-app="${attr(app.id)}" tabindex="0" role="link" aria-label="${attr(app.name || app.id)} ayrıntıları">
+    <article class="hero-card" data-open-app="${attr(app.id)}" data-provider="${attr(appProvider(app))}" tabindex="0" role="link" aria-label="${attr(app.name || app.id)} (${attr(providerLabel(app))}) ayrıntıları">
       <div class="hero-media${hero ? "" : " is-placeholder"}">${hero ? `<img src="${hero}" alt="" />` : ""}</div>
       <div class="hero-scrim"></div>
       <div class="hero-content">
@@ -1438,12 +1535,12 @@ function heroHtml(app) {
           ${appIconHtml(app)}
           <div>
             <h2>${escapeHtml(app.name || app.id)}</h2>
-            <p class="hero-developer">${developer}</p>
+            <p class="hero-developer">${escapeHtml(developer)}</p>
           </div>
         </div>
         ${summary ? `<p class="hero-summary">${escapeHtml(summary)}</p>` : ""}
         <div class="hero-actions">
-          <button class="btn btn-hero-primary btn-lg" type="button" data-open-app="${attr(app.id)}">İncele</button>
+          <button class="btn btn-hero-primary btn-lg" type="button" data-open-app="${attr(app.id)}" data-provider="${attr(appProvider(app))}">İncele</button>
           ${secondary}
         </div>
       </div>
@@ -1534,7 +1631,9 @@ function renderDiscover() {
 
 function renderSearch() {
   const query = state.query;
-  const count = state.searchResults.length;
+  const visible = state.searchResults.filter(app => providerMatches(app, state.searchProvider));
+  const count = visible.length;
+  const hasResults = state.searchResults.length > 0;
   const tooShort = query.length < 2;
   const meta = tooShort
     ? "En az 2 karakter"
@@ -1562,23 +1661,32 @@ function renderSearch() {
     });
   } else if (!count) {
     body = stateHtml({
-      title: "Sonuç bulunamadı",
-      text: `“${query}” için Flathub’da uygulama bulunamadı.\nFarklı bir ad ya da anahtar kelime deneyin.`,
+      title: hasResults ? "Bu sağlayıcıda sonuç yok" : "Sonuç bulunamadı",
+      text: hasResults
+        ? `“${query}” için ${providerName(state.searchProvider)} uygulaması bulunamadı. Farklı bir sağlayıcı deneyin.`
+        : `“${query}” için uygulama bulunamadı.\nFarklı bir ad ya da anahtar kelime deneyin.`,
       retry: "search",
       icon: ICON.search,
     });
   } else {
-    body = `<div class="app-list">${state.searchResults.map(app => appRowHtml(app, "search")).join("")}</div>`;
+    body = `<div class="app-list">${visible.map(app => appRowHtml(app, "search")).join("")}</div>`;
   }
+
+  const controls = tooShort
+    ? `<p class="view-note">${escapeHtml(meta)}</p>`
+    : `<div class="view-tools">
+        <p class="view-note">${escapeHtml(meta)}</p>
+        ${providerFilterHtml("search", state.searchProvider)}
+      </div>`;
 
   els.searchView.innerHTML = `
     <header class="view-head">
       <div class="view-title">
         <p class="eyebrow">Arama</p>
         <h1>“${escapeHtml(query)}”</h1>
-        <p class="view-sub">Flathub kataloğunda arama</p>
+        <p class="view-sub">Flatpak, Snap ve Homebrew kataloglarında arama.</p>
       </div>
-      <p class="view-note">${escapeHtml(meta)}</p>
+      ${controls}
     </header>
     ${body}`;
 }
@@ -1664,7 +1772,11 @@ function renderCategory() {
 function renderInstalled() {
   const updates = state.installed.filter(app => app.updateAvailable).length;
   if (!updates) state.updatesOnly = false;
-  const visible = state.updatesOnly ? state.installed.filter(app => app.updateAvailable) : state.installed;
+  const provider = state.installedProvider;
+  const providerApps = state.installed.filter(app => providerMatches(app, provider));
+  const visible = state.updatesOnly
+    ? providerApps.filter(app => app.updateAvailable)
+    : providerApps;
 
   let body;
   if (state.installedLoading && !state.installed.length) {
@@ -1677,13 +1789,20 @@ function renderInstalled() {
       icon: ICON.warning,
     });
   } else if (!visible.length) {
+    const providerNameText = provider === "all" ? "" : providerName(provider);
     body = stateHtml({
-      title: state.updatesOnly ? "Güncelleme yok" : "Henüz yüklü uygulama yok",
+      title: state.updatesOnly
+        ? providerNameText ? `${providerNameText} için güncelleme yok` : "Güncelleme yok"
+        : state.installed.length && providerNameText ? `${providerNameText} uygulaması yok` : "Henüz yüklü uygulama yok",
       text: state.updatesOnly
-        ? "Tüm kullanıcı uygulamaları güncel görünüyor."
-        : "Flathub’dan bir uygulama kurduğunuzda burada görünür.",
+        ? providerNameText
+          ? `${providerNameText} için bekleyen güncelleme görünmüyor.`
+          : "Tüm paket yöneticilerinde bekleyen güncelleme görünmüyor."
+        : state.installed.length && providerNameText
+          ? `${providerNameText} sağlayıcısında yüklü uygulama yok.`
+          : "Bir uygulama kurduğunuzda burada görünür.",
       icon: ICON.box,
-      action: state.updatesOnly
+      action: state.updatesOnly || (state.installed.length && providerNameText)
         ? ""
         : '<button class="btn btn-ghost" type="button" data-nav="discover">Keşfet’e göz at</button>',
     });
@@ -1698,9 +1817,12 @@ function renderInstalled() {
         <h1>Yüklü Uygulamalar</h1>
         <p class="view-sub">${state.installed.length} uygulama${updates ? ` · ${updates} güncelleme` : ""}</p>
       </div>
-      ${updates ? `<button class="chip" type="button" data-updates-filter aria-pressed="${state.updatesOnly}">
-        Güncellemeler <span>${updates}</span>
-      </button>` : ""}
+      ${state.installed.length ? `<div class="view-tools">
+        ${updates ? `<button class="chip" type="button" data-updates-filter aria-pressed="${state.updatesOnly}">
+          Güncellemeler <span>${updates}</span>
+        </button>` : ""}
+        ${providerFilterHtml("installed", provider)}
+      </div>` : ""}
     </header>
     ${storeNoticeHtml()}
     ${body}`;
@@ -1713,6 +1835,7 @@ function detailActionButtons(app) {
 function infoCardHtml(detail) {
   const app = detail.app;
   const rows = [];
+  rows.push(["Paket sağlayıcısı", providerLabel(app)]);
   if (app.version) rows.push(["Sürüm", app.version]);
   if (app.category) rows.push(["Kategori", categoryName(app.category)]);
   if (detail.license) rows.push(["Lisans", detail.license]);
@@ -1809,7 +1932,7 @@ function renderDetail() {
       </div>
       ${stateHtml({
         title: "Uygulama yüklenemedi",
-        text: state.detailError || "Flathub’dan uygulama ayrıntıları alınamadı.",
+        text: state.detailError || "Uygulama ayrıntıları alınamadı.",
         retry: "detail",
         icon: ICON.warning,
       })}`;
@@ -1817,6 +1940,8 @@ function renderDetail() {
   }
 
   const app = detail.app;
+  const provider = appProvider(app);
+  const isFlatpak = provider === "flatpak";
   const screenshots = Array.isArray(detail.screenshots) ? detail.screenshots : [];
   const reviews = Array.isArray(detail.reviews) ? detail.reviews : [];
   const categories = Array.isArray(detail.categories) ? detail.categories : [];
@@ -1841,11 +1966,23 @@ function renderDetail() {
     : "";
 
   const description = sanitizeDescription(detail.description);
+  const sourceLabel = provider === "flatpak" ? "Flathub · Flatpak" : providerLabel(app);
+  const communityContent = isFlatpak
+    ? `<section class="detail-section">
+        <h2>Topluluk yorumları <span class="source-note">ODRS üzerinden</span></h2>
+        ${reviewsHtml(reviews)}
+      </section>`
+    : "";
+  const providerNote = isFlatpak
+    ? "Açıklama, ekran görüntüleri ve sürüm bilgileri Flathub’dan; topluluk puanları ve yorumları ODRS’den alınır. Kurulum ve kaldırma işlemleri kullanıcı kapsamında Flatpak ile yapılır."
+    : provider === "snap"
+      ? "Snap işlemleri sistem kapsamında yönetilir. İşlem sırasında sistem yetkilendirme penceresi açılabilir."
+      : "Kurulum, güncelleme ve kaldırma işlemleri Homebrew paket yöneticisiyle yönetilir.";
 
   els.detailView.innerHTML = `
     <div class="detail-top">
       <button class="text-back" type="button" data-back>${ICON.arrow}Geri</button>
-      <span class="detail-source">Flathub · Flatpak</span>
+      <span class="detail-source">${escapeHtml(sourceLabel)}</span>
     </div>
 
     <section class="detail-hero">
@@ -1853,14 +1990,14 @@ function renderDetail() {
       <div class="detail-intro">
         <div class="detail-title-line">
           <h1>${escapeHtml(app.name || app.id)}</h1>
-          ${detail.verified ? `<span class="verified-badge">${ICON.check}Doğrulanmış</span>` : ""}
+          ${isFlatpak && detail.verified ? `<span class="verified-badge">${ICON.check}Doğrulanmış</span>` : ""}
         </div>
-        <p class="detail-dev">${escapeHtml(app.developer || "Flathub topluluğu")}</p>
+        ${app.developer ? `<p class="detail-dev">${escapeHtml(app.developer)}</p>` : ""}
         ${app.summary ? `<p class="detail-summary">${escapeHtml(app.summary)}</p>` : ""}
         ${tags.length ? `<div class="detail-tags">${tags.join("")}</div>` : ""}
         <div class="detail-actions">
           ${detailActionButtons(app)}
-          <span class="detail-size">${detail.downloadSize ? `İndirme: ${formatBytes(detail.downloadSize)}` : "Flathub’dan kurulur"}</span>
+          <span class="detail-size">${detail.downloadSize ? `İndirme: ${formatBytes(detail.downloadSize)} · ` : ""}${escapeHtml(providerInstallInfo(app))}</span>
         </div>
       </div>
     </section>
@@ -1872,18 +2009,15 @@ function renderDetail() {
           <h2>Açıklama</h2>
           ${description ? `<div class="prose">${description}</div>` : '<p class="prose">Açıklama sağlanmamış.</p>'}
         </section>
-        <section class="detail-section">
-          <h2>Topluluk yorumları <span class="source-note">ODRS üzerinden</span></h2>
-          ${reviewsHtml(reviews)}
-        </section>
+        ${communityContent}
       </div>
       <aside class="detail-side">
-        ${ratingCardHtml(detail.rating)}
+        ${isFlatpak ? ratingCardHtml(detail.rating) : ""}
         ${infoCardHtml(detail)}
       </aside>
     </div>
 
-    <p class="detail-footnote">Açıklama, ekran görüntüleri ve sürüm bilgileri Flathub’dan; topluluk puanları ve yorumları ODRS’den alınır. Kurulum ve kaldırma işlemleri kullanıcı kapsamında Flatpak ile yapılır.</p>`;
+    <p class="detail-footnote">${providerNote}</p>`;
 }
 
 function renderSettings() {
@@ -1918,16 +2052,24 @@ function renderSettings() {
 
   const flatpakVersion = state.storeInfo?.flatpakVersion || "bulunamadı";
   const setup = state.setup.status;
-  const flatpakReady = setup ? Boolean(setup.flatpakAvailable) : Boolean(state.storeInfo?.flatpakAvailable);
-  const flathubReady = setup ? Boolean(setup.userFlathubAvailable) : Boolean(state.storeInfo?.userFlathubAvailable);
-  const flatpakDetail = flatpakReady
-    ? (setup?.flatpakVersion || state.storeInfo?.flatpakVersion || "Kurulu")
-    : "Kurulu değil";
-  const flathubDetail = flathubReady
-    ? "Kullanıcı deposu hazır"
-    : setup?.flathubAvailable
-      ? "Sistem deposu var · kullanıcı deposu eksik"
-      : "Eklenmeli";
+  const flatpakAvailable = setup?.flatpakAvailable ?? state.storeInfo?.flatpakAvailable;
+  const flathubAvailable = setup?.userFlathubAvailable ?? state.storeInfo?.userFlathubAvailable;
+  const flatpakReady = Boolean(flatpakAvailable);
+  const flathubReady = Boolean(flathubAvailable);
+  const flatpakDetail = typeof flatpakAvailable !== "boolean"
+    ? "Durum bilinmiyor"
+    : flatpakReady
+      ? (setup?.flatpakVersion || state.storeInfo?.flatpakVersion || "Kurulu")
+      : "Kurulu değil";
+  const flathubDetail = typeof flathubAvailable !== "boolean"
+    ? "Durum bilinmiyor"
+    : flathubReady
+      ? "Kullanıcı deposu hazır"
+      : setup?.flathubAvailable
+        ? "Sistem deposu var · kullanıcı deposu eksik"
+        : "Eklenmeli";
+  const flatpakStatusClass = typeof flatpakAvailable !== "boolean" ? "is-pending" : flatpakReady ? "is-ok" : "is-error";
+  const flathubStatusClass = typeof flathubAvailable !== "boolean" ? "is-pending" : flathubReady ? "is-ok" : "is-error";
 
   els.settingsView.innerHTML = `
     <header class="view-head">
@@ -1961,19 +2103,21 @@ function renderSettings() {
     <section class="settings-section">
       <div class="settings-head">
         <h2>Sistem hazırlığı</h2>
-        <p>Macro Store uygulamaları kullanıcı kapsamında Flatpak ile kurar. Gerekli bileşenleri buradan denetleyin.</p>
+        <p>Flatpak kullanıcı kapsamında kurulur. Snap sistem kapsamında yönetilir; Homebrew kendi paket yöneticisini kullanır. Burada yalnızca algılanan kullanılabilirlik gösterilir.</p>
       </div>
       <div class="system-status">
         <div class="system-row">
-          <span class="status-dot ${flatpakReady ? "is-ok" : "is-error"}" aria-hidden="true"></span>
+          <span class="status-dot ${flatpakStatusClass}" aria-hidden="true"></span>
           <span>Flatpak</span>
           <strong>${escapeHtml(flatpakDetail)}</strong>
         </div>
         <div class="system-row">
-          <span class="status-dot ${flathubReady ? "is-ok" : "is-error"}" aria-hidden="true"></span>
+          <span class="status-dot ${flathubStatusClass}" aria-hidden="true"></span>
           <span>Flathub</span>
           <strong>${escapeHtml(flathubDetail)}</strong>
         </div>
+        ${managerStatusRowHtml("Snap", state.storeInfo?.snapAvailable)}
+        ${managerStatusRowHtml("Homebrew", state.storeInfo?.brewAvailable)}
       </div>
       ${setup?.distroName ? `<p class="system-meta">${escapeHtml(setup.distroName)}${setup.packageManagerLabel ? ` · ${escapeHtml(setup.packageManagerLabel)}` : ""}</p>` : ""}
       <button class="btn btn-ghost" type="button" data-open-setup>${flatpakReady && flathubReady ? "Kurulum bilgilerini aç" : "Kurulum sihirbazını aç"}</button>
@@ -1994,34 +2138,19 @@ function renderSettings() {
 
     <section class="settings-section">
       <div class="settings-head">
-        <h2>Diğer kaynaklar</h2>
-        <p>Macro Store şimdilik yalnızca Flathub ekosistemine odaklanır.</p>
-      </div>
-      <div class="disabled-source">
-        <span class="repo-mark" aria-hidden="true">${ICON.box}</span>
-        <div class="repo-body">
-          <div class="repo-title"><strong>Homebrew</strong><span class="repo-badge">Yakında</span></div>
-          <p class="repo-url">Homebrew formülleri ve casks desteği ileride eklenecek.</p>
-        </div>
-        <span class="soon-badge">Devre dışı</span>
-      </div>
-    </section>
-
-    <section class="settings-section">
-      <div class="settings-head">
         <h2>Mağaza bilgileri</h2>
       </div>
       <div class="about-lines">
-        <div><strong>Macro Store</strong> 0.3.0 · Flathub tabanlı Linux yazılım mağazası</div>
+        <div><strong>Macro Store</strong> 0.3.0 · Linux uygulama mağazası</div>
         <div>Flatpak: <strong>${escapeHtml(flatpakVersion)}</strong> · Kullanıcı kapsamı</div>
-        <div>Uygulama verileri Flathub API’sinden, topluluk yorumları ODRS’den alınır.</div>
+        <div>Snap sistem kapsamında yönetilir; Homebrew paketleri kendi yöneticisiyle çalışır.</div>
       </div>
     </section>`;
 }
 /* ── İşlemler ──────────────────────────────────────── */
 
-function patchApp(app, action, id) {
-  if (!app || app.id !== id) return;
+function patchApp(app, action, provider, id) {
+  if (!sameApp(app, provider, id)) return;
   if (action === "install") {
     app.installed = true;
     app.updateAvailable = false;
@@ -2033,7 +2162,7 @@ function patchApp(app, action, id) {
   }
 }
 
-function applyAction(action, id) {
+function applyAction(action, provider, id) {
   const lists = [
     state.searchResults,
     state.installed,
@@ -2042,19 +2171,22 @@ function applyAction(action, id) {
     state.discover?.popular || [],
     state.discover?.recent || [],
   ];
-  for (const list of lists) list.forEach(app => patchApp(app, action, id));
-  if (state.discover?.appOfDay) patchApp(state.discover.appOfDay, action, id);
-  if (state.detail?.app) patchApp(state.detail.app, action, id);
+  for (const list of lists) list.forEach(app => patchApp(app, action, provider, id));
+  if (state.discover?.appOfDay) patchApp(state.discover.appOfDay, action, provider, id);
+  if (state.detail?.app) patchApp(state.detail.app, action, provider, id);
 
   if (action === "remove") {
-    state.installed = state.installed.filter(app => app.id !== id);
+    state.installed = state.installed.filter(app => !sameApp(app, provider, id));
   }
   if (action === "install") {
-    const source = state.searchResults.find(app => app.id === id)
-      || state.detail?.app
-      || state.discover?.appOfDay
-      || state.discover?.picks?.find(app => app.id === id);
-    if (source && state.installedLoaded && !state.installed.some(app => app.id === id)) {
+    const source = state.searchResults.find(matchesApps(provider, id))
+      || (sameApp(state.detail?.app, provider, id) ? state.detail.app : null)
+      || (sameApp(state.discover?.appOfDay, provider, id) ? state.discover.appOfDay : null)
+      || state.discover?.picks?.find(matchesApps(provider, id))
+      || state.discover?.popular?.find(matchesApps(provider, id))
+      || state.discover?.recent?.find(matchesApps(provider, id))
+      || state.category?.apps?.find(matchesApps(provider, id));
+    if (source && state.installedLoaded && !state.installed.some(app => sameApp(app, provider, id))) {
       state.installed.push({ ...source, installed: true, updateAvailable: false });
       state.installed.sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "tr", { sensitivity: "base" }));
     }
@@ -2063,16 +2195,17 @@ function applyAction(action, id) {
 
 async function performAction(action, app) {
   if (!app || state.busy || !ACTIONS[action]) return;
-  state.busy = { id: app.id, action, name: app.name || app.id };
-  showActivity(`${app.name || app.id} ${ACTIONS[action].verb}…`);
+  const provider = appProvider(app);
+  state.busy = { id: app.id, provider, action, name: app.name || app.id };
+  showActivity(`${app.name || app.id} · ${providerManagerLabel(app)} ${ACTIONS[action].verb}…`);
   renderRoute();
 
   try {
-    const outcome = await invoke(`${action}_app`, { id: app.id });
+    const outcome = await invoke(`${action}_app`, { id: app.id, provider });
     if (outcome && outcome.success === false) {
       throw new Error(outcome.message || "İşlem başarısız oldu.");
     }
-    applyAction(action, app.id);
+    applyAction(action, provider, app.id);
     toast(outcome?.message || ACTIONS[action].done, "success");
   } catch (err) {
     toast(errText(err), "error");
@@ -2086,9 +2219,16 @@ async function performAction(action, app) {
 }
 
 function askRemove(app) {
+  const provider = appProvider(app);
+  const explanation = provider === "flatpak"
+    ? "kullanıcı kapsamındaki Flatpak kurulumundan"
+    : provider === "snap"
+      ? "Snap yöneticisi üzerinden sistem kapsamından"
+      : "Homebrew paket yöneticisi üzerinden";
+  const authorization = provider === "snap" ? " İşlem sırasında sistem yetkilendirme penceresi açılabilir." : "";
   askConfirm({
     title: "Uygulamayı kaldır",
-    text: `${app.name || app.id} kullanıcı kurulumundan kaldırılacak. Bu işlem geri alınamaz.`,
+    text: `${app.name || app.id}, ${explanation} kaldırılacak. Bu işlem geri alınamaz.${authorization}`,
     label: "Kaldır",
     onConfirm: () => performAction("remove", app),
   });
@@ -2323,6 +2463,7 @@ function bindEvents() {
     const value = els.searchInput.value.trim();
     els.searchClear.hidden = !els.searchInput.value;
     cancelPendingSearch();
+    state.searchSeq += 1;
 
     if (!value) {
       resetSearch({ goDiscover: state.route.name === "search" });
@@ -2405,21 +2546,39 @@ function bindEvents() {
       copyCommand(copyTarget.dataset.copyCommand);
       return;
     }
+    const providerFilter = target.closest("[data-provider-filter]");
+    if (providerFilter) {
+      const scope = providerFilter.dataset.providerFilter;
+      const provider = providerFilter.dataset.provider;
+      if (!PROVIDER_FILTERS.some(option => option.value === provider)) return;
+      if (scope === "search") {
+        state.searchProvider = provider;
+        renderSearch();
+      } else if (scope === "installed") {
+        state.installedProvider = provider;
+        renderInstalled();
+      }
+      return;
+    }
+
 
     const actionButton = target.closest("[data-action]");
     if (actionButton && !actionButton.disabled) {
       const id = actionButton.dataset.id;
+      const provider = actionButton.dataset.provider || "flatpak";
       const action = actionButton.dataset.action;
       if (!id || !ACTIONS[action]) return;
-      const app = state.detail?.app?.id === id
-        ? state.detail.app
-        : state.installed.find(item => item.id === id)
-          || state.searchResults.find(item => item.id === id)
-          || state.discover?.appOfDay?.id === id && state.discover.appOfDay
-          || state.discover?.picks?.find(item => item.id === id)
-          || state.discover?.popular?.find(item => item.id === id)
-          || state.discover?.recent?.find(item => item.id === id)
-          || state.category?.apps?.find(item => item.id === id);
+      const candidates = [
+        state.detail?.app,
+        ...state.installed,
+        ...state.searchResults,
+        state.discover?.appOfDay,
+        ...(state.discover?.picks || []),
+        ...(state.discover?.popular || []),
+        ...(state.discover?.recent || []),
+        ...(state.category?.apps || []),
+      ];
+      const app = candidates.find(matchesApps(provider, id));
       if (!app) return;
       if (action === "remove") askRemove(app);
       else performAction(action, app);
@@ -2466,12 +2625,13 @@ function bindEvents() {
     const open = target.closest("[data-open-app]");
     if (open) {
       const id = open.dataset.openApp;
+      const provider = open.dataset.provider || "flatpak";
       if (!id) return;
       els.main.scrollTop = 0;
-      if (state.route.name !== "detail" || state.route.id !== id) {
-        navigate({ name: "detail", id });
+      if (state.route.name !== "detail" || state.route.id !== id || appProvider(state.route) !== provider) {
+        navigate({ name: "detail", id, provider });
       }
-      loadDetail(id);
+      loadDetail(id, provider);
       return;
     }
 
@@ -2482,7 +2642,7 @@ function bindEvents() {
       else if (kind === "search") runSearch(state.query);
       else if (kind === "installed") loadInstalled(true);
       else if (kind === "category") loadCategory(state.route.slug, 1, true);
-      else if (kind === "detail") loadDetail(state.route.id, true);
+      else if (kind === "detail") loadDetail(state.route.id, appProvider(state.route), true);
       else if (kind === "remotes") loadRemotes(true);
       return;
     }
@@ -2732,6 +2892,7 @@ function mockFallback(id) {
   const base = known || { id, name: id, developer: "Flathub", summary: "", category: null };
   return {
     id,
+    provider: "flatpak",
     name: base.name,
     summary: base.summary,
     developer: base.developer,
@@ -2782,6 +2943,7 @@ function mockAppFromAppstream(appstream) {
   const categories = appstream.categories || [];
   return {
     id: appstream.id,
+    provider: "flatpak",
     name: appstream.name || appstream.id,
     summary: appstream.summary || "",
     developer: appstream.developer_name || "",
@@ -2806,6 +2968,7 @@ async function mockAppstream(id) {
 function mockApiApp(hit) {
   const id = hit.app_id || hit.id || "";
   return {
+    provider: "flatpak",
     id,
     name: hit.name || id,
     summary: hit.summary || "",
@@ -2923,7 +3086,10 @@ function mockReviews(app) {
   ];
 }
 
-async function mockDetail(id) {
+async function mockDetail(id, provider = "flatpak") {
+  if (provider !== "flatpak") {
+    throw new Error("Tarayıcı demosunda Snap ve Homebrew için örnek uygulama yok.");
+  }
   const { appstream } = await mockAppstream(id);
   const screenshots = mockScreenshots(appstream);
   const app = mockAppFromAppstream(appstream);
@@ -3038,7 +3204,10 @@ function mockRemoveRemote(name) {
   return `${name} deposu kaldırıldı.`;
 }
 
-async function mockOperation(action, id) {
+async function mockOperation(action, id, provider = "flatpak") {
+  if (provider !== "flatpak") {
+    throw new Error("Tarayıcı demosunda bu sağlayıcı için örnek uygulama yok.");
+  }
   if (!ACTIONS[action]) throw new Error("Bilinmeyen işlem.");
   if (action !== "install" && !MOCK.installed.has(id)) {
     throw new Error("Bu Flatpak uygulaması kullanıcı kurulumunda yüklü değil.");
@@ -3190,7 +3359,7 @@ async function mockInvoke(command, args = {}) {
   }
 
   if (command === "get_app_detail") {
-    return mockDetail(args.appId || args.app_id);
+    return mockDetail(args.appId || args.app_id, args.provider || "flatpak");
   }
 
   if (command === "list_installed_apps") {
@@ -3217,7 +3386,7 @@ async function mockInvoke(command, args = {}) {
 
   if (["install_app", "remove_app", "update_app"].includes(command)) {
     const action = command.replace("_app", "");
-    return mockOperation(action, args.id);
+    return mockOperation(action, args.id, args.provider || "flatpak");
   }
 
   throw new Error(`Bilinmeyen komut: ${command}`);

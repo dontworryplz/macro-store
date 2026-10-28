@@ -4,7 +4,7 @@ version = "0.3.0"
 description = "Macro Store — Flathub tabanlı Linux yazılım mağazası"
 authors = ["Macro Store"]
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.90.0"
 
 [lib]
 name = "mss_lib"
@@ -25,6 +25,6 @@ tokio = { version = "1", features = ["process", "io-util", "macros", "rt", "time
 [profile.release]
 panic = "abort"
 codegen-units = 1
-lto = true
-opt-level = "s"
+lto = "thin"
+opt-level = 3
 strip = true

@@ -1,3 +1,6 @@
+mod brew;
+mod snap;
+
 use base64::Engine as _;
 use futures::future::join_all;
 use serde::de::DeserializeOwned;
@@ -9,9 +12,11 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
-use std::time::Duration;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex, OnceLock,
+};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, BufReader as AsyncBufReader};
 use tokio::process::Command as AsyncCommand;
@@ -75,9 +80,22 @@ const CATEGORIES: [&str; 11] = [
     "utility",
 ];
 
+const FLATPAK_CACHE_TTL: Duration = Duration::from_secs(15);
+const FLATPAK_VERSION_TTL: Duration = Duration::from_secs(30);
+type FlatpakStateCache = Mutex<Option<(Instant, Arc<FlatpakSnapshot>)>>;
+type FlatpakVersionCache = Mutex<Option<(Instant, Option<String>)>>;
+static FLATPAK_STATE_CACHE: OnceLock<FlatpakStateCache> = OnceLock::new();
+static FLATPAK_VERSION_CACHE: OnceLock<FlatpakVersionCache> = OnceLock::new();
 static OPERATING: AtomicBool = AtomicBool::new(false);
 static SETTING_UP: AtomicBool = AtomicBool::new(false);
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+#[derive(Default)]
+struct FlatpakSnapshot {
+    installed: HashSet<String>,
+    updates: HashSet<String>,
+    apps: Vec<FlatpakInstalled>,
+}
 
 struct OperationLock;
 
@@ -102,12 +120,16 @@ struct StoreInfo {
     flatpak_version: Option<String>,
     flathub_available: bool,
     user_flathub_available: bool,
+    snap_available: bool,
+    brew_available: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AppItem {
     id: String,
+    provider: String,
+    package_type: Option<String>,
     name: String,
     summary: String,
     developer: String,
@@ -253,6 +275,7 @@ struct CmdOutput {
 struct FlatpakInstalled {
     app_id: String,
     name: String,
+    summary: String,
     version: String,
 }
 
@@ -561,6 +584,23 @@ fn truncate_chars(value: &str, max: usize) -> String {
 }
 
 fn flatpak_version() -> Option<String> {
+    let Ok(mut cache) = FLATPAK_VERSION_CACHE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+    else {
+        return read_flatpak_version();
+    };
+    if let Some((checked_at, version)) = cache.as_ref() {
+        if checked_at.elapsed() < FLATPAK_VERSION_TTL {
+            return version.clone();
+        }
+    }
+    let version = read_flatpak_version();
+    *cache = Some((Instant::now(), version.clone()));
+    version
+}
+
+fn read_flatpak_version() -> Option<String> {
     let output = run_capture("flatpak", &["--version"]).ok()?;
     if !output.success {
         return None;
@@ -572,6 +612,18 @@ fn flatpak_version() -> Option<String> {
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .map(str::to_string)
+}
+
+fn invalidate_flatpak_cache() {
+    if let Ok(mut cache) = FLATPAK_VERSION_CACHE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+    {
+        *cache = None;
+    }
+    if let Ok(mut cache) = FLATPAK_STATE_CACHE.get_or_init(|| Mutex::new(None)).lock() {
+        *cache = None;
+    }
 }
 
 fn flatpak_available() -> bool {
@@ -638,7 +690,12 @@ fn package_plan(manager: &str) -> Option<PackagePlan> {
         "pacman" => ("pacman", "Pacman · Arch Linux", PACMAN_INSTALL_ARGS, false),
         "zypper" => ("zypper", "Zypper · openSUSE", ZYPPER_INSTALL_ARGS, false),
         "apk" => ("apk", "APK · Alpine Linux", APK_INSTALL_ARGS, false),
-        "xbps-install" => ("xbps-install", "XBPS · Void Linux", XBPS_INSTALL_ARGS, false),
+        "xbps-install" => (
+            "xbps-install",
+            "XBPS · Void Linux",
+            XBPS_INSTALL_ARGS,
+            false,
+        ),
         "eopkg" => ("eopkg", "eopkg · Solus", EOPKG_INSTALL_ARGS, false),
         "rpm-ostree" => (
             "rpm-ostree",
@@ -657,12 +714,14 @@ fn package_plan(manager: &str) -> Option<PackagePlan> {
 }
 
 fn setup_status() -> SetupStatus {
+    let os_release = read_os_release();
     let version = flatpak_version();
     let flatpak_available = version.is_some();
     let remotes = list_remotes_sync().unwrap_or_default();
     let flathub_available = remotes.iter().any(|remote| remote.name == "flathub");
-    let user_flathub_available = flatpak_user_remotes().contains_key("flathub");
-    let os_release = read_os_release();
+    let user_flathub_available = remotes
+        .iter()
+        .any(|remote| remote.name == "flathub" && remote.scope == "user");
     let distro_id = os_release
         .get("ID")
         .map(|value| value.trim().to_string())
@@ -705,14 +764,13 @@ fn setup_status() -> SetupStatus {
     }
 }
 
-
 fn valid_flatpak_id(app_id: &str) -> bool {
     if app_id.is_empty() || app_id.len() > 255 || app_id.starts_with('-') {
         return false;
     }
-    app_id.chars().all(|ch| {
-        ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '+')
-    })
+    app_id
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '+'))
 }
 
 fn valid_remote_name(name: &str) -> bool {
@@ -775,7 +833,9 @@ fn flatpak_user_remotes() -> HashMap<String, String> {
 
 fn ensure_flathub_user_remote() -> Result<(), String> {
     if !flatpak_available() {
-        return Err("Flatpak sistemde bulunamadı. Kurmak için: https://flatpak.org/setup/".to_string());
+        return Err(
+            "Flatpak sistemde bulunamadı. Kurmak için: https://flatpak.org/setup/".to_string(),
+        );
     }
     if flatpak_user_remotes().contains_key("flathub") {
         return Ok(());
@@ -796,25 +856,45 @@ fn ensure_flathub_user_remote() -> Result<(), String> {
     Ok(())
 }
 
-fn flatpak_user_installed_ids() -> HashSet<String> {
-    let mut ids = HashSet::new();
-    if let Ok(output) = run_capture(
+fn read_flatpak_user_list() -> Vec<FlatpakInstalled> {
+    let Ok(output) = run_capture(
         "flatpak",
-        &["list", "--user", "--app", "--columns=application"],
-    ) {
-        for line in output.stdout.lines() {
-            let id = line.trim();
-            if !id.is_empty() {
-                ids.insert(id.to_string());
-            }
-        }
+        &[
+            "list",
+            "--user",
+            "--app",
+            "--columns=application,name,description,version",
+        ],
+    ) else {
+        return Vec::new();
+    };
+    if !output.success {
+        return Vec::new();
     }
-    ids
+    parse_flatpak_user_list(&output.stdout)
 }
 
-fn flatpak_user_updates() -> HashSet<String> {
-    let mut ids = HashSet::new();
-    if let Ok(output) = run_capture(
+fn parse_flatpak_user_list(text: &str) -> Vec<FlatpakInstalled> {
+    let mut apps = Vec::new();
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let mut fields = line.split('\t');
+        let app_id = fields.next().unwrap_or("").trim();
+        if app_id.eq_ignore_ascii_case("application") || !valid_flatpak_id(app_id) {
+            continue;
+        }
+        apps.push(FlatpakInstalled {
+            app_id: app_id.to_string(),
+            name: fields.next().unwrap_or(app_id).trim().to_string(),
+            summary: truncate_chars(fields.next().unwrap_or("").trim(), 500),
+            version: fields.next().unwrap_or("").trim().to_string(),
+        });
+    }
+    apps.sort_by_key(|app| app.name.to_lowercase());
+    apps
+}
+
+fn read_flatpak_user_updates() -> HashSet<String> {
+    run_capture(
         "flatpak",
         &[
             "remote-ls",
@@ -823,61 +903,50 @@ fn flatpak_user_updates() -> HashSet<String> {
             "--app",
             "--columns=application",
         ],
-    ) {
-        for line in output.stdout.lines() {
-            let id = line.trim();
-            if !id.is_empty() {
-                ids.insert(id.to_string());
-            }
-        }
-    }
-    ids
+    )
+    .ok()
+    .filter(|output| output.success)
+    .map(|output| {
+        output
+            .stdout
+            .lines()
+            .map(str::trim)
+            .filter(|id| valid_flatpak_id(id))
+            .map(str::to_string)
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
-fn flatpak_user_list() -> Vec<FlatpakInstalled> {
-    let mut apps = Vec::new();
-    let Ok(output) = run_capture(
-        "flatpak",
-        &[
-            "list",
-            "--user",
-            "--app",
-            "--columns=application,name,version",
-        ],
-    ) else {
-        return apps;
+fn read_flatpak_snapshot() -> FlatpakSnapshot {
+    let apps = read_flatpak_user_list();
+    let installed = apps.iter().map(|app| app.app_id.clone()).collect();
+    let updates = read_flatpak_user_updates();
+    FlatpakSnapshot {
+        installed,
+        updates,
+        apps,
+    }
+}
+
+fn flatpak_snapshot() -> Arc<FlatpakSnapshot> {
+    let Ok(mut cache) = FLATPAK_STATE_CACHE.get_or_init(|| Mutex::new(None)).lock() else {
+        return Arc::new(read_flatpak_snapshot());
     };
-    if !output.success {
-        return apps;
-    }
-    for line in output.stdout.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
+    if let Some((checked_at, snapshot)) = cache.as_ref() {
+        if checked_at.elapsed() < FLATPAK_CACHE_TTL {
+            return Arc::clone(snapshot);
         }
-        let fields: Vec<&str> = line.split('\t').collect();
-        let app_id = fields.first().copied().unwrap_or("").trim();
-        if app_id.is_empty() {
-            continue;
-        }
-        apps.push(FlatpakInstalled {
-            app_id: app_id.to_string(),
-            name: fields.get(1).copied().unwrap_or(app_id).trim().to_string(),
-            version: fields.get(2).copied().unwrap_or("").trim().to_string(),
-        });
     }
-    apps.sort_by_key(|app| app.name.to_lowercase());
-    apps
+    let snapshot = Arc::new(read_flatpak_snapshot());
+    *cache = Some((Instant::now(), Arc::clone(&snapshot)));
+    snapshot
 }
 
-fn flatpak_info_summary(app_id: &str) -> Option<String> {
-    let output = run_capture("flatpak", &["info", "--user", app_id]).ok()?;
-    if !output.success {
-        return None;
-    }
-    let first = output.stdout.lines().next()?.trim();
-    let (_, summary) = first.split_once(" - ")?;
-    Some(summary.trim().to_string())
+async fn flatpak_snapshot_async() -> Result<Arc<FlatpakSnapshot>, String> {
+    tokio::task::spawn_blocking(flatpak_snapshot)
+        .await
+        .map_err(|err| format!("Flatpak durumu arka planda okunamadı: {err}"))
 }
 
 fn flatpak_icon_url(app_id: &str) -> String {
@@ -906,9 +975,7 @@ fn data_url_from_file(path: &Path) -> Option<String> {
 fn flatpak_icon_data_url(app_id: &str) -> Option<String> {
     let mut roots = Vec::new();
     if let Some(home) = env::var_os("HOME") {
-        roots.push(
-            PathBuf::from(home).join(".local/share/flatpak/exports/share/icons"),
-        );
+        roots.push(PathBuf::from(home).join(".local/share/flatpak/exports/share/icons"));
     }
     roots.push(PathBuf::from("/var/lib/flatpak/exports/share/icons"));
     let themes = ["hicolor", "Adwaita", "breeze", "breeze-dark"];
@@ -932,18 +999,20 @@ fn flatpak_icon_data_url(app_id: &str) -> Option<String> {
     None
 }
 
-fn installed_apps() -> Vec<AppItem> {
-    let updates = flatpak_user_updates();
-    flatpak_user_list()
-        .into_iter()
+fn installed_apps(snapshot: &FlatpakSnapshot) -> Vec<AppItem> {
+    snapshot
+        .apps
+        .iter()
         .map(|installed| {
-            let update_available = updates.contains(&installed.app_id);
+            let update_available = snapshot.updates.contains(&installed.app_id);
             AppItem {
                 id: installed.app_id.clone(),
-                name: installed.name,
-                summary: flatpak_info_summary(&installed.app_id).unwrap_or_default(),
+                provider: "flatpak".to_string(),
+                package_type: None,
+                name: installed.name.clone(),
+                summary: installed.summary.clone(),
                 developer: String::new(),
-                version: installed.version,
+                version: installed.version.clone(),
                 icon: flatpak_icon_data_url(&installed.app_id)
                     .or_else(|| Some(flatpak_icon_url(&installed.app_id))),
                 installed: true,
@@ -978,7 +1047,7 @@ fn http_client() -> &'static reqwest::Client {
     HTTP_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
-            .user_agent("MacroStore/0.2 (Flathub istemcisi)")
+            .user_agent("MacroStore/0.3 (Linux app store)")
             .build()
             .expect("HTTP istemcisi oluşturulamadı")
     })
@@ -1004,7 +1073,10 @@ async fn get_json<T: DeserializeOwned>(url: &str) -> Result<T, String> {
 }
 
 async fn get_optional<T: DeserializeOwned>(url: &str) -> Option<T> {
-    get_json(url).await.ok()
+    tokio::time::timeout(Duration::from_secs(5), get_json(url))
+        .await
+        .ok()?
+        .ok()
 }
 
 fn safe_icon(value: Option<String>, app_id: &str) -> Option<String> {
@@ -1021,7 +1093,11 @@ fn category_of(app: &ApiApp) -> Option<String> {
         .filter(|value| CATEGORIES.contains(&value.as_str()))
 }
 
-fn app_from_api(app: ApiApp, installed: &HashSet<String>, updates: &HashSet<String>) -> Option<AppItem> {
+fn app_from_api(
+    app: ApiApp,
+    installed: &HashSet<String>,
+    updates: &HashSet<String>,
+) -> Option<AppItem> {
     let id = app.app_id.trim().to_string();
     if !valid_flatpak_id(&id) || app.name.trim().is_empty() {
         return None;
@@ -1041,13 +1117,53 @@ fn app_from_api(app: ApiApp, installed: &HashSet<String>, updates: &HashSet<Stri
         monthly_installs: app.installs_last_month,
         hero_image: None,
         id,
+        provider: "flatpak".to_string(),
+        package_type: None,
     })
+}
+
+fn app_from_snap(item: snap::ProviderApp) -> AppItem {
+    AppItem {
+        id: item.id,
+        provider: "snap".to_string(),
+        package_type: item.package_type,
+        name: item.name,
+        summary: item.summary,
+        developer: item.developer,
+        version: item.version,
+        icon: item.icon,
+        installed: item.installed,
+        update_available: item.update_available,
+        category: item.category,
+        monthly_installs: None,
+        hero_image: None,
+    }
+}
+
+fn app_from_brew(item: brew::ProviderApp) -> AppItem {
+    AppItem {
+        id: item.id,
+        provider: "brew".to_string(),
+        package_type: item.package_type,
+        name: item.name,
+        summary: item.summary,
+        developer: item.developer,
+        version: item.version,
+        icon: item.icon,
+        installed: item.installed,
+        update_available: item.update_available,
+        category: item.category,
+        monthly_installs: None,
+        hero_image: None,
+    }
 }
 
 fn fallback_app(id: &str, installed: &HashSet<String>, updates: &HashSet<String>) -> AppItem {
     let is_installed = installed.contains(id);
     AppItem {
         id: id.to_string(),
+        provider: "flatpak".to_string(),
+        package_type: None,
         name: id.to_string(),
         summary: String::new(),
         developer: String::new(),
@@ -1127,8 +1243,8 @@ fn verified(appstream: &Appstream) -> bool {
 
 async fn fetch_appstream_item(
     id: String,
-    installed: HashSet<String>,
-    updates: HashSet<String>,
+    installed: &HashSet<String>,
+    updates: &HashSet<String>,
 ) -> AppItem {
     let url = format!("{FLATHUB_API}/appstream/{id}");
     match get_json::<Appstream>(&url).await {
@@ -1140,18 +1256,29 @@ async fn fetch_appstream_item(
                 .unwrap_or_default();
             let is_installed = installed.contains(&id);
             let icon = safe_icon(appstream.icon.clone(), &id);
-            let hero_image = screenshots_of(&appstream).first().map(|item| item.url.clone());
+            let hero_image = screenshots_of(&appstream)
+                .first()
+                .map(|item| item.url.clone());
             let category = main_category_from_appstream(&appstream.categories);
             let update_available = is_installed && updates.contains(&id);
             AppItem {
                 id,
-                name: truncate_chars(if appstream.name.trim().is_empty() {
-                    appstream.id.as_str()
-                } else {
-                    appstream.name.trim()
-                }, 120),
+                provider: "flatpak".to_string(),
+                package_type: None,
+                name: truncate_chars(
+                    if appstream.name.trim().is_empty() {
+                        appstream.id.as_str()
+                    } else {
+                        appstream.name.trim()
+                    },
+                    120,
+                ),
                 summary: truncate_chars(appstream.summary.trim(), 500),
-                developer: appstream.developer_name.unwrap_or_default().trim().to_string(),
+                developer: appstream
+                    .developer_name
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
                 version,
                 icon,
                 installed: is_installed,
@@ -1161,15 +1288,15 @@ async fn fetch_appstream_item(
                 hero_image,
             }
         }
-        Err(_) => fallback_app(&id, &installed, &updates),
+        Err(_) => fallback_app(&id, installed, updates),
     }
 }
 
 async fn fetch_collection(
     path: &str,
     per_page: usize,
-    installed: HashSet<String>,
-    updates: HashSet<String>,
+    installed: &HashSet<String>,
+    updates: &HashSet<String>,
 ) -> Vec<AppItem> {
     let url = format!("{FLATHUB_API}/collection/{path}?page=1&per_page={per_page}&locale=tr");
     let Ok(response) = get_json::<ApiSearchResponse>(&url).await else {
@@ -1178,7 +1305,7 @@ async fn fetch_collection(
     response
         .hits
         .into_iter()
-        .filter_map(|app| app_from_api(app, &installed, &updates))
+        .filter_map(|app| app_from_api(app, installed, updates))
         .collect()
 }
 
@@ -1226,6 +1353,8 @@ fn flatpak_search_fallback(
         let is_installed = installed.contains(app_id);
         apps.push(AppItem {
             id: app_id.to_string(),
+            provider: "flatpak".to_string(),
+            package_type: None,
             name: name.to_string(),
             summary: truncate_chars(summary, 500),
             developer: String::new(),
@@ -1247,14 +1376,19 @@ fn flatpak_search_fallback(
 /* ── Tauri komutları ────────────────────────────────── */
 
 #[tauri::command]
-fn get_setup_status() -> SetupStatus {
-    setup_status()
+async fn get_setup_status() -> Result<SetupStatus, String> {
+    tokio::task::spawn_blocking(setup_status)
+        .await
+        .map_err(|err| format!("Sistem hazırlığı durumu arka planda okunamadı: {err}"))
 }
 
 #[tauri::command]
 async fn install_flatpak(app: AppHandle) -> Result<SetupStatus, String> {
     if OPERATING.load(Ordering::SeqCst) {
-        return Err("Bir Flatpak işlemi sürüyor. Lütfen işlem tamamlandıktan sonra yeniden deneyin.".to_string());
+        return Err(
+            "Bir Flatpak işlemi sürüyor. Lütfen işlem tamamlandıktan sonra yeniden deneyin."
+                .to_string(),
+        );
     }
     if SETTING_UP
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -1266,8 +1400,13 @@ async fn install_flatpak(app: AppHandle) -> Result<SetupStatus, String> {
 
     emit_setup_log(&app, "Sistem hazırlığı başlatıldı.", "info");
 
-    if !flatpak_available() {
-        let status = setup_status();
+    let flatpak_installed = tokio::task::spawn_blocking(flatpak_available)
+        .await
+        .map_err(|err| format!("Flatpak durumu arka planda okunamadı: {err}"))?;
+    if !flatpak_installed {
+        let status = tokio::task::spawn_blocking(setup_status)
+            .await
+            .map_err(|err| format!("Sistem hazırlığı durumu arka planda okunamadı: {err}"))?;
         emit_setup_log(
             &app,
             format!("Dağıtım algılandı: {}", status.distro_name),
@@ -1286,7 +1425,8 @@ async fn install_flatpak(app: AppHandle) -> Result<SetupStatus, String> {
         };
         if !status.polkit_available {
             let message = if status.manual_command.is_empty() {
-                "Polkit (pkexec) bulunamadı. Flatpak’ı terminalden kurup yeniden deneyin.".to_string()
+                "Polkit (pkexec) bulunamadı. Flatpak’ı terminalden kurup yeniden deneyin."
+                    .to_string()
             } else {
                 format!(
                     "Polkit (pkexec) bulunamadı. Terminalde şu komutu çalıştırın: {}",
@@ -1297,11 +1437,10 @@ async fn install_flatpak(app: AppHandle) -> Result<SetupStatus, String> {
             return Err(message);
         }
 
-        let pkexec = host_program("pkexec")
-            .ok_or_else(|| "Polkit (pkexec) bulunamadı.".to_string())?;
-        let manager_path = host_program(plan.name).ok_or_else(|| {
-            format!("{} paket yöneticisi bulunamadı.", plan.name)
-        })?;
+        let pkexec =
+            host_program("pkexec").ok_or_else(|| "Polkit (pkexec) bulunamadı.".to_string())?;
+        let manager_path = host_program(plan.name)
+            .ok_or_else(|| format!("{} paket yöneticisi bulunamadı.", plan.name))?;
         emit_setup_log(
             &app,
             format!("Flatpak, {} ile kuruluyor…", plan.label),
@@ -1310,13 +1449,7 @@ async fn install_flatpak(app: AppHandle) -> Result<SetupStatus, String> {
 
         let mut args: Vec<OsString> = vec![manager_path.clone().into_os_string()];
         args.extend(plan.install_args.iter().map(OsString::from));
-        let mut result = run_setup_step(
-            &app,
-            &pkexec,
-            &args,
-            "Flatpak paketi kuruldu.",
-        )
-        .await;
+        let mut result = run_setup_step(&app, &pkexec, &args, "Flatpak paketi kuruldu.").await;
 
         if let Err(error) = &result {
             let apt_needs_update = plan.name == "apt-get"
@@ -1337,49 +1470,61 @@ async fn install_flatpak(app: AppHandle) -> Result<SetupStatus, String> {
                     .await
                     .is_ok()
                 {
-                    let mut retry_args: Vec<OsString> =
-                        vec![manager_path.clone().into_os_string()];
+                    let mut retry_args: Vec<OsString> = vec![manager_path.clone().into_os_string()];
                     retry_args.extend(plan.install_args.iter().map(OsString::from));
-                    result = run_setup_step(
-                        &app,
-                        &pkexec,
-                        &retry_args,
-                        "Flatpak paketi kuruldu.",
-                    )
-                    .await;
+                    result =
+                        run_setup_step(&app, &pkexec, &retry_args, "Flatpak paketi kuruldu.").await;
                 }
             }
         }
+        invalidate_flatpak_cache();
         result?;
 
-        if plan.needs_reboot && !flatpak_available() {
+        if plan.needs_reboot
+            && !tokio::task::spawn_blocking(flatpak_available)
+                .await
+                .map_err(|err| format!("Flatpak durumu arka planda okunamadı: {err}"))?
+        {
             let message = "Flatpak katmanı rpm-ostree ile hazırlandı. Kullanmak için bilgisayarı yeniden başlatın.";
             emit_setup_log(&app, message, "info");
-            let mut next = setup_status();
+            let mut next = tokio::task::spawn_blocking(setup_status)
+                .await
+                .map_err(|err| format!("Sistem hazırlığı durumu arka planda okunamadı: {err}"))?;
             next.reboot_required = true;
             let _ = app.emit("setup-finished", next.clone());
             return Ok(next);
         }
 
-        if !flatpak_available() {
+        if !tokio::task::spawn_blocking(flatpak_available)
+            .await
+            .map_err(|err| format!("Flatpak durumu arka planda okunamadı: {err}"))?
+        {
             let message = "Flatpak paketi kuruldu ancak flatpak komutu bulunamadı. Terminalde flatpak --version çalıştırıp yeniden deneyin.".to_string();
             emit_setup_log(&app, format!("✕ {message}"), "error");
             return Err(message);
         }
     }
 
-    if !flatpak_user_remotes().contains_key("flathub") {
+    if !tokio::task::spawn_blocking(|| flatpak_user_remotes().contains_key("flathub"))
+        .await
+        .map_err(|err| format!("Flathub durumu arka planda okunamadı: {err}"))?
+    {
         emit_setup_log(&app, "Flathub kullanıcı deposu ekleniyor…", "info");
-        let output = run_capture(
-            "flatpak",
-            &[
-                "remote-add",
-                "--user",
-                "--if-not-exists",
-                "flathub",
-                FLATHUB_REPO,
-            ],
-        )?;
+        let output = tokio::task::spawn_blocking(|| {
+            run_capture(
+                "flatpak",
+                &[
+                    "remote-add",
+                    "--user",
+                    "--if-not-exists",
+                    "flathub",
+                    FLATHUB_REPO,
+                ],
+            )
+        })
+        .await
+        .map_err(|err| format!("Flathub deposu arka planda eklenemedi: {err}"))??;
+        invalidate_flatpak_cache();
         if !output.success {
             let message = failure_message("flatpak remote-add", &output);
             emit_setup_log(&app, format!("✕ {message}"), "error");
@@ -1390,7 +1535,9 @@ async fn install_flatpak(app: AppHandle) -> Result<SetupStatus, String> {
         emit_setup_log(&app, "Flathub kullanıcı deposu zaten hazır.", "info");
     }
 
-    let status = setup_status();
+    let status = tokio::task::spawn_blocking(setup_status)
+        .await
+        .map_err(|err| format!("Sistem hazırlığı durumu arka planda okunamadı: {err}"))?;
     if !status.ready {
         let message = "Kurulum tamamlandı ancak Flatpak ve Flathub hazır görünmüyor. Durumu yenileyip yeniden deneyin.".to_string();
         emit_setup_log(&app, format!("✕ {message}"), "error");
@@ -1403,17 +1550,25 @@ async fn install_flatpak(app: AppHandle) -> Result<SetupStatus, String> {
 }
 
 #[tauri::command]
-fn get_store_info() -> StoreInfo {
-    let version = flatpak_version();
-    let remotes = list_remotes_sync().unwrap_or_default();
-    let flathub_available = remotes.iter().any(|remote| remote.name == "flathub");
-    let user_flathub_available = flatpak_user_remotes().contains_key("flathub");
-    StoreInfo {
-        flatpak_available: version.is_some(),
-        flatpak_version: version,
-        flathub_available,
-        user_flathub_available,
-    }
+async fn get_store_info() -> Result<StoreInfo, String> {
+    tokio::task::spawn_blocking(|| {
+        let version = flatpak_version();
+        let remotes = list_remotes_sync().unwrap_or_default();
+        let flathub_available = remotes.iter().any(|remote| remote.name == "flathub");
+        let user_flathub_available = remotes
+            .iter()
+            .any(|remote| remote.name == "flathub" && remote.scope == "user");
+        StoreInfo {
+            flatpak_available: version.is_some(),
+            flatpak_version: version,
+            flathub_available,
+            user_flathub_available,
+            snap_available: snap::available(),
+            brew_available: brew::available(),
+        }
+    })
+    .await
+    .map_err(|err| format!("Paket yöneticileri arka planda denetlenemedi: {err}"))
 }
 
 #[tauri::command]
@@ -1421,55 +1576,60 @@ async fn get_discover(date: String) -> Result<DiscoverData, String> {
     if !valid_date(&date) {
         return Err("Tarih biçimi geçersiz.".to_string());
     }
-    let installed = flatpak_user_installed_ids();
-    let updates = flatpak_user_updates();
-
+    let snapshot = flatpak_snapshot_async().await?;
     let day_url = format!("{FLATHUB_API}/app-picks/app-of-the-day/{date}");
     let week_url = format!("{FLATHUB_API}/app-picks/apps-of-the-week/{date}");
-    let (day, week, popular, recent) = tokio::join!(
+    let (day, week) = tokio::join!(
         get_optional::<ApiAppOfDay>(&day_url),
         get_optional::<ApiPicks>(&week_url),
-        fetch_collection("popular", 12, installed.clone(), updates.clone()),
-        fetch_collection("recently-added", 8, installed.clone(), updates.clone()),
     );
 
     let day_id = day
         .as_ref()
         .map(|value| value.app_id.clone())
         .filter(|value| valid_flatpak_id(value));
-    let mut picks_ids: Vec<String> = week
-        .map(|value| {
-            value
-                .apps
-                .into_iter()
-                .map(|item| item.app_id)
-                .filter(|id| valid_flatpak_id(id))
-                .collect()
-        })
-        .unwrap_or_default();
-    picks_ids.dedup();
-
-    let mut ids = Vec::new();
+    let mut ids = Vec::with_capacity(6);
+    let mut seen = HashSet::with_capacity(6);
     if let Some(id) = day_id.clone() {
+        seen.insert(id.clone());
         ids.push(id);
     }
-    for id in picks_ids {
-        if !ids.contains(&id) {
-            ids.push(id);
+    if let Some(week) = week {
+        for id in week
+            .apps
+            .into_iter()
+            .map(|item| item.app_id)
+            .filter(|id| valid_flatpak_id(id))
+        {
+            if seen.insert(id.clone()) {
+                ids.push(id);
+                if ids.len() == 6 {
+                    break;
+                }
+            }
         }
     }
 
-    let fetched = join_all(ids.iter().cloned().map(|id| {
-        fetch_appstream_item(id, installed.clone(), updates.clone())
-    }))
-    .await;
+    let (collections, fetched) = tokio::join!(
+        async {
+            tokio::join!(
+                fetch_collection("popular", 12, &snapshot.installed, &snapshot.updates),
+                fetch_collection("recently-added", 8, &snapshot.installed, &snapshot.updates),
+            )
+        },
+        join_all(
+            ids.iter()
+                .cloned()
+                .map(|id| { fetch_appstream_item(id, &snapshot.installed, &snapshot.updates) })
+        ),
+    );
+    let (popular, recent) = collections;
 
     let app_of_day = day_id
         .as_ref()
         .and_then(|id| fetched.iter().find(|item| &item.id == id).cloned())
         .or_else(|| fetched.first().cloned())
         .or_else(|| popular.first().cloned());
-
     let picks = fetched
         .iter()
         .filter(|item| Some(&item.id) != day_id.as_ref())
@@ -1486,12 +1646,10 @@ async fn get_discover(date: String) -> Result<DiscoverData, String> {
     })
 }
 
-#[tauri::command]
-async fn search_apps(query: String) -> Result<Vec<AppItem>, String> {
-    let query = valid_query(&query)?;
-    let installed = flatpak_user_installed_ids();
-    let updates = flatpak_user_updates();
-
+async fn search_flatpak(
+    query: String,
+    snapshot: Arc<FlatpakSnapshot>,
+) -> Result<Vec<AppItem>, String> {
     let response = http_client()
         .post(format!("{FLATHUB_API}/search?locale=tr"))
         .header("Accept", "application/json")
@@ -1509,7 +1667,7 @@ async fn search_apps(query: String) -> Result<Vec<AppItem>, String> {
                 Ok(payload) => Ok(payload
                     .hits
                     .into_iter()
-                    .filter_map(|app| app_from_api(app, &installed, &updates))
+                    .filter_map(|app| app_from_api(app, &snapshot.installed, &snapshot.updates))
                     .collect::<Vec<_>>()),
                 Err(err) => Err(format!("Flathub arama verisi okunamadı: {err}")),
             }
@@ -1520,14 +1678,71 @@ async fn search_apps(query: String) -> Result<Vec<AppItem>, String> {
         )),
         Err(err) => Err(format!("Flathub'a ulaşılamadı: {err}")),
     };
-
     match result {
         Ok(apps) => Ok(apps),
-        Err(api_error) => match flatpak_search_fallback(&query, &installed, &updates) {
-            Ok(apps) if !apps.is_empty() => Ok(apps),
-            _ => Err(api_error),
-        },
+        Err(api_error) => {
+            let installed = snapshot.installed.clone();
+            let updates = snapshot.updates.clone();
+            let fallback = tokio::task::spawn_blocking(move || {
+                flatpak_search_fallback(&query, &installed, &updates)
+            })
+            .await
+            .map_err(|err| format!("Flatpak araması arka planda tamamlanamadı: {err}"))?;
+            match fallback {
+                Ok(apps) if !apps.is_empty() => Ok(apps),
+                _ => Err(api_error),
+            }
+        }
     }
+}
+
+#[tauri::command]
+async fn search_apps(query: String) -> Result<Vec<AppItem>, String> {
+    let query = valid_query(&query)?;
+    let snapshot = flatpak_snapshot_async().await?;
+    let flatpak = search_flatpak(query.clone(), snapshot);
+    let snap = snap::search(&query);
+    let brew = brew::search(&query);
+    let (flatpak, snap, brew) = tokio::join!(flatpak, snap, brew);
+    let mut sources = Vec::with_capacity(3);
+    let mut errors = Vec::new();
+    for result in [
+        flatpak.map_err(|error| format!("Flathub: {error}")),
+        snap.map(|apps| apps.into_iter().map(app_from_snap).collect())
+            .map_err(|error| format!("Snap: {error}")),
+        brew.map(|apps| apps.into_iter().map(app_from_brew).collect())
+            .map_err(|error| format!("Homebrew: {error}")),
+    ] {
+        match result {
+            Ok(apps) => sources.push(apps),
+            Err(error) => errors.push(error),
+        }
+    }
+    if sources.is_empty() {
+        return Err(errors.join(" · "));
+    }
+
+    let max_source_len = sources.iter().map(Vec::len).max().unwrap_or(0);
+    let mut results = Vec::with_capacity(SEARCH_LIMIT);
+    let mut seen = HashSet::with_capacity(SEARCH_LIMIT);
+    for index in 0..max_source_len {
+        for source in &sources {
+            let Some(item) = source.get(index) else {
+                continue;
+            };
+            let key = (item.provider.clone(), item.id.clone());
+            if seen.insert(key) {
+                results.push(item.clone());
+                if results.len() == SEARCH_LIMIT {
+                    return Ok(results);
+                }
+            }
+        }
+    }
+    if results.is_empty() && !errors.is_empty() {
+        return Err(errors.join(" · "));
+    }
+    Ok(results)
 }
 
 #[tauri::command]
@@ -1536,8 +1751,7 @@ async fn get_category(slug: String, page: Option<u32>) -> Result<CategoryPage, S
         return Err("Kategori bulunamadı.".to_string());
     }
     let page = page.unwrap_or(1).max(1);
-    let installed = flatpak_user_installed_ids();
-    let updates = flatpak_user_updates();
+    let snapshot = flatpak_snapshot_async().await?;
     let url = format!(
         "{FLATHUB_API}/collection/category/{slug}?page={page}&per_page={CATEGORY_LIMIT}&locale=tr"
     );
@@ -1545,7 +1759,7 @@ async fn get_category(slug: String, page: Option<u32>) -> Result<CategoryPage, S
     let apps = response
         .hits
         .into_iter()
-        .filter_map(|app| app_from_api(app, &installed, &updates))
+        .filter_map(|app| app_from_api(app, &snapshot.installed, &snapshot.updates))
         .collect();
     Ok(CategoryPage {
         slug,
@@ -1557,12 +1771,56 @@ async fn get_category(slug: String, page: Option<u32>) -> Result<CategoryPage, S
 }
 
 #[tauri::command]
-async fn get_app_detail(app_id: String) -> Result<AppDetail, String> {
+async fn get_app_detail(app_id: String, provider: String) -> Result<AppDetail, String> {
+    match provider.as_str() {
+        "flatpak" => get_flatpak_app_detail(app_id).await,
+        "snap" => {
+            let detail = snap::detail(&app_id).await?;
+            let app = app_from_snap(detail.app);
+            let categories = app.category.iter().cloned().collect();
+            Ok(AppDetail {
+                app,
+                description: detail.description,
+                screenshots: Vec::new(),
+                categories,
+                license: detail.license,
+                verified: false,
+                homepage: detail.homepage,
+                download_size: None,
+                installed_size: None,
+                installs_last_month: None,
+                rating: None,
+                reviews: Vec::new(),
+            })
+        }
+        "brew" => {
+            let detail = brew::detail(&app_id).await?;
+            let app = app_from_brew(detail.app);
+            let categories = app.category.iter().cloned().collect();
+            Ok(AppDetail {
+                app,
+                description: detail.description,
+                screenshots: Vec::new(),
+                categories,
+                license: detail.license,
+                verified: false,
+                homepage: detail.homepage,
+                download_size: None,
+                installed_size: None,
+                installs_last_month: None,
+                rating: None,
+                reviews: Vec::new(),
+            })
+        }
+        _ => Err("Paket sağlayıcısı geçersiz.".to_string()),
+    }
+}
+
+async fn get_flatpak_app_detail(app_id: String) -> Result<AppDetail, String> {
     if !valid_flatpak_id(&app_id) {
         return Err("Uygulama kimliği geçersiz.".to_string());
     }
-    let installed = flatpak_user_installed_ids();
-    let updates = flatpak_user_updates();
+    let snapshot = flatpak_snapshot_async().await?;
     let encoded = app_id.clone();
     let appstream_url = format!("{FLATHUB_API}/appstream/{encoded}");
     let summary_url = format!("{FLATHUB_API}/summary/{encoded}");
@@ -1592,21 +1850,31 @@ async fn get_app_detail(app_id: String) -> Result<AppDetail, String> {
         .first()
         .and_then(|release| release.version.clone())
         .unwrap_or_default();
-    let is_installed = installed.contains(&app_id);
+    let is_installed = snapshot.installed.contains(&app_id);
     let monthly_installs = stats.and_then(|value| value.installs_last_month);
     let app = AppItem {
         id: app_id.clone(),
-        name: truncate_chars(if appstream.name.trim().is_empty() {
-            appstream.id.as_str()
-        } else {
-            appstream.name.trim()
-        }, 120),
+        provider: "flatpak".to_string(),
+        package_type: None,
+        name: truncate_chars(
+            if appstream.name.trim().is_empty() {
+                appstream.id.as_str()
+            } else {
+                appstream.name.trim()
+            },
+            120,
+        ),
         summary: truncate_chars(appstream.summary.trim(), 500),
-        developer: appstream.developer_name.clone().unwrap_or_default().trim().to_string(),
+        developer: appstream
+            .developer_name
+            .clone()
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
         version,
         icon: safe_icon(appstream.icon.clone(), &app_id),
         installed: is_installed,
-        update_available: is_installed && updates.contains(&app_id),
+        update_available: is_installed && snapshot.updates.contains(&app_id),
         category: main_category_from_appstream(&appstream.categories),
         monthly_installs,
         hero_image: screenshots.first().map(|item| item.url.clone()),
@@ -1614,7 +1882,11 @@ async fn get_app_detail(app_id: String) -> Result<AppDetail, String> {
 
     let rating = ratings.and_then(|value| {
         let stars = vec![
-            value.star1, value.star2, value.star3, value.star4, value.star5,
+            value.star1,
+            value.star2,
+            value.star3,
+            value.star4,
+            value.star5,
         ];
         let total: u64 = stars.iter().sum();
         if total == 0 {
@@ -1699,11 +1971,37 @@ async fn get_app_detail(app_id: String) -> Result<AppDetail, String> {
 }
 
 #[tauri::command]
-fn list_installed_apps() -> Result<Vec<AppItem>, String> {
-    if !flatpak_available() {
-        return Ok(Vec::new());
-    }
-    Ok(installed_apps())
+async fn list_installed_apps() -> Result<Vec<AppItem>, String> {
+    let flatpak = tokio::task::spawn_blocking(|| -> Result<Vec<AppItem>, String> {
+        if flatpak_available() {
+            Ok(installed_apps(&flatpak_snapshot()))
+        } else {
+            Ok(Vec::new())
+        }
+    });
+    let snap = tokio::task::spawn_blocking(|| {
+        if snap::available() {
+            snap::installed()
+                .map(|apps| apps.into_iter().map(app_from_snap).collect())
+                .map_err(|error| format!("Snap yüklü uygulamaları okunamadı: {error}"))
+        } else {
+            Ok(Vec::new())
+        }
+    });
+    let brew = tokio::task::spawn_blocking(|| {
+        if brew::available() {
+            brew::installed()
+                .map(|apps| apps.into_iter().map(app_from_brew).collect())
+                .map_err(|error| format!("Homebrew yüklü uygulamaları okunamadı: {error}"))
+        } else {
+            Ok(Vec::new())
+        }
+    });
+    let (flatpak, snap, brew) = tokio::join!(flatpak, snap, brew);
+    let mut apps = flatpak.map_err(|error| format!("Flatpak envanteri okunamadı: {error}"))??;
+    apps.extend(snap.map_err(|error| format!("Snap envanteri okunamadı: {error}"))??);
+    apps.extend(brew.map_err(|error| format!("Homebrew envanteri okunamadı: {error}"))??);
+    Ok(apps)
 }
 
 #[tauri::command]
@@ -1753,7 +2051,9 @@ fn list_remotes_sync() -> Result<Vec<RemoteInfo>, String> {
 #[tauri::command]
 async fn add_flatpak_remote(name: String, url: String) -> Result<String, String> {
     if !valid_remote_name(&name) {
-        return Err("Depo adı yalnızca harf, rakam, nokta, tire ve alt çizgi içerebilir.".to_string());
+        return Err(
+            "Depo adı yalnızca harf, rakam, nokta, tire ve alt çizgi içerebilir.".to_string(),
+        );
     }
     if !valid_remote_url(&url) {
         return Err("Depo adresi geçerli bir http(s) adresi olmalı.".to_string());
@@ -1763,17 +2063,12 @@ async fn add_flatpak_remote(name: String, url: String) -> Result<String, String>
     }
     let output = run_capture(
         "flatpak",
-        &[
-            "remote-add",
-            "--user",
-            "--if-not-exists",
-            &name,
-            &url,
-        ],
+        &["remote-add", "--user", "--if-not-exists", &name, &url],
     )?;
     if !output.success {
         return Err(failure_message("flatpak remote-add", &output));
     }
+    invalidate_flatpak_cache();
     Ok(format!("{name} deposu eklendi."))
 }
 
@@ -1799,6 +2094,7 @@ async fn remove_flatpak_remote(name: String) -> Result<String, String> {
     if !output.success {
         return Err(failure_message("flatpak remote-delete", &output));
     }
+    invalidate_flatpak_cache();
     Ok(format!("{name} deposu kaldırıldı."))
 }
 
@@ -1814,9 +2110,12 @@ fn emit_log(app: &AppHandle, line: impl Into<String>, kind: &str) {
     );
 }
 
-fn build_flatpak_command(app_id: &str, action: ActionKind) -> Result<(PathBuf, Vec<OsString>, String), String> {
-    let flatpak = host_program("flatpak")
-        .ok_or_else(|| "Flatpak sistemde bulunamadı.".to_string())?;
+fn build_flatpak_command(
+    app_id: &str,
+    action: ActionKind,
+) -> Result<(PathBuf, Vec<OsString>, String), String> {
+    let flatpak =
+        host_program("flatpak").ok_or_else(|| "Flatpak sistemde bulunamadı.".to_string())?;
     let args: Vec<String> = match action {
         ActionKind::Install => vec![
             "install".to_string(),
@@ -1967,16 +2266,38 @@ async fn run_setup_step(
     Err(message)
 }
 
+async fn run_app_action(
+    app: AppHandle,
+    id: String,
+    provider: String,
+    action: ActionKind,
+) -> Result<OperationOutcome, String> {
+    match provider.as_str() {
+        "flatpak" => run_flatpak_action(app, id, action).await,
+        "snap" | "brew" => run_provider_action(app, id, provider, action).await,
+        _ => Err("Paket sağlayıcısı geçersiz.".to_string()),
+    }
+}
 
-async fn run_app_action(app: AppHandle, id: String, action: ActionKind) -> Result<OperationOutcome, String> {
+async fn run_flatpak_action(
+    app: AppHandle,
+    id: String,
+    action: ActionKind,
+) -> Result<OperationOutcome, String> {
     if !valid_flatpak_id(&id) {
         return Err("Uygulama kimliği geçersiz.".to_string());
     }
-    if !flatpak_available() {
+    if !tokio::task::spawn_blocking(flatpak_available)
+        .await
+        .map_err(|err| format!("Flatpak durumu arka planda okunamadı: {err}"))?
+    {
         return Err("Flatpak sistemde bulunamadı.".to_string());
     }
     if SETTING_UP.load(Ordering::SeqCst) {
-        return Err("Sistem hazırlığı sürüyor. Lütfen kurulum tamamlandıktan sonra yeniden deneyin.".to_string());
+        return Err(
+            "Sistem hazırlığı sürüyor. Lütfen kurulum tamamlandıktan sonra yeniden deneyin."
+                .to_string(),
+        );
     }
     if OPERATING
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -1987,8 +2308,10 @@ async fn run_app_action(app: AppHandle, id: String, action: ActionKind) -> Resul
     let _lock = OperationLock;
 
     if action == ActionKind::Install {
-        ensure_flathub_user_remote()?;
-    } else if !flatpak_user_installed_ids().contains(&id) {
+        tokio::task::spawn_blocking(ensure_flathub_user_remote)
+            .await
+            .map_err(|err| format!("Flathub durumu arka planda okunamadı: {err}"))??;
+    } else if !flatpak_snapshot_async().await?.installed.contains(&id) {
         return Err("Bu Flatpak uygulaması kullanıcı kurulumunda yüklü değil.".to_string());
     }
 
@@ -2070,6 +2393,7 @@ async fn run_app_action(app: AppHandle, id: String, action: ActionKind) -> Resul
         .map_err(|err| format!("İşlem durumu alınamadı: {err}"))?;
     let success = status.success();
     let code = status.code();
+    invalidate_flatpak_cache();
 
     let message = if success {
         action.success_message().to_string()
@@ -2105,19 +2429,80 @@ async fn run_app_action(app: AppHandle, id: String, action: ActionKind) -> Resul
     Ok(outcome)
 }
 
-#[tauri::command]
-async fn install_app(app: AppHandle, id: String) -> Result<OperationOutcome, String> {
-    run_app_action(app, id, ActionKind::Install).await
+async fn run_provider_action(
+    app: AppHandle,
+    id: String,
+    provider: String,
+    action: ActionKind,
+) -> Result<OperationOutcome, String> {
+    if SETTING_UP.load(Ordering::SeqCst) {
+        return Err(
+            "Sistem hazırlığı sürüyor. Lütfen tamamlandıktan sonra yeniden deneyin.".to_string(),
+        );
+    }
+    if OPERATING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("Zaten devam eden bir işlem var.".to_string());
+    }
+    let _lock = OperationLock;
+    let operation = action.as_str();
+    let result = match provider.as_str() {
+        "snap" => snap::action(&id, operation).await,
+        "brew" => brew::action(&id, operation).await,
+        _ => return Err("Paket sağlayıcısı geçersiz.".to_string()),
+    };
+    let message = match result {
+        Ok(message) => message,
+        Err(error) => {
+            emit_log(&app, format!("✕ {error}"), "error");
+            return Err(error);
+        }
+    };
+    emit_log(&app, format!("✓ {message}"), "info");
+    let outcome = OperationOutcome {
+        success: true,
+        code: None,
+        message,
+        app_id: id,
+        action: operation.to_string(),
+        manager: if provider == "snap" {
+            "Snap"
+        } else {
+            "Homebrew"
+        }
+        .to_string(),
+    };
+    let _ = app.emit("app-finished", outcome.clone());
+    Ok(outcome)
 }
 
 #[tauri::command]
-async fn remove_app(app: AppHandle, id: String) -> Result<OperationOutcome, String> {
-    run_app_action(app, id, ActionKind::Remove).await
+async fn install_app(
+    app: AppHandle,
+    id: String,
+    provider: String,
+) -> Result<OperationOutcome, String> {
+    run_app_action(app, id, provider, ActionKind::Install).await
 }
 
 #[tauri::command]
-async fn update_app(app: AppHandle, id: String) -> Result<OperationOutcome, String> {
-    run_app_action(app, id, ActionKind::Update).await
+async fn remove_app(
+    app: AppHandle,
+    id: String,
+    provider: String,
+) -> Result<OperationOutcome, String> {
+    run_app_action(app, id, provider, ActionKind::Remove).await
+}
+
+#[tauri::command]
+async fn update_app(
+    app: AppHandle,
+    id: String,
+    provider: String,
+) -> Result<OperationOutcome, String> {
+    run_app_action(app, id, provider, ActionKind::Update).await
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -2148,8 +2533,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn flatpak_inventory_parses_columns_and_sorts_by_name() {
+        let apps = parse_flatpak_user_list(
+            "Application\tName\tDescription\tVersion\norg.example.Zeta\tZeta\tEditor for notes\t2.4\norg.example.Alpha\tAlpha\t\t1.0\n",
+        );
+        assert_eq!(apps.len(), 2);
+        assert_eq!(apps[0].app_id, "org.example.Alpha");
+        assert_eq!(apps[0].version, "1.0");
+        assert_eq!(apps[1].summary, "Editor for notes");
+        assert_eq!(apps[1].version, "2.4");
+    }
+    #[test]
     fn flatpak_ids_reject_options_and_paths() {
-        for id in ["org.mozilla.firefox", "com.agateau.nanonote", "io.github.a_b.C-1"] {
+        for id in [
+            "org.mozilla.firefox",
+            "com.agateau.nanonote",
+            "io.github.a_b.C-1",
+        ] {
             assert!(valid_flatpak_id(id), "{id} geçerli olmalıydı");
         }
         for id in ["-x", "foo/bar", "foo bar", "$(id)", "", "foo\nbar"] {

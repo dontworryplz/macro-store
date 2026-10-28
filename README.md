@@ -2,12 +2,13 @@
 
 Macro Store, **Flathub** kataloğunu sade ve göz yormayan bir arayüzle sunan
 hafif bir Linux yazılım mağazasıdır. Uygulamaları keşfeder, arar, ayrıntılarını
-ve topluluk yorumlarını inceler; Flatpak uygulamalarını kullanıcı kapsamında
-kurar, kaldırır ve günceller.
+ve topluluk yorumlarını inceler; Flatpak, Snap ve Linux Homebrew paketlerini
+tek ekrandan bulur ve yönetir.
 
-Mağaza yalnızca Flatpak ve Flathub ekosistemine odaklanır. Yerel paket
-yöneticileri mağaza özelliği olarak kullanılmaz; sistem paket yöneticisi yalnızca
-ilk kurulumda eksik Flatpak'ı kurmak için çağrılır.
+Flathub kataloğu Flatpak için ana mağaza deneyimini sağlar. Snap Store ve
+Homebrew desteklenen sistemlerde ayrı sağlayıcılar olarak aranabilir ve
+yönetilebilir; sistem paket yöneticisi yalnızca ilk kurulumda eksik Flatpak'ı
+kurmak için çağrılır.
 
 ## Özellikler
 
@@ -16,11 +17,12 @@ ilk kurulumda eksik Flatpak'ı kurmak için çağrılır.
 - Kategoriler, arama ve uygulama ayrıntı ekranı
 - Flathub açıklaması, sürüm bilgisi, ekran görüntüleri ve bağlantılar
 - ODRS üzerinden topluluk puanları ve yorumları
-- Kullanıcı kapsamında kurulum, kaldırma ve güncelleme
-- Yüklü uygulamalar listesi ve güncelleme filtresi
+- Kullanıcı kapsamında Flatpak kurulum, kaldırma ve güncelleme
+- Snap Store araması ve Snap paket işlemleri (sistem kapsamında; Polkit gerekebilir)
+- Linux Homebrew formula ve Linux desteği bildiren cask paketleri
+- Yüklü uygulamalar listesi ve sağlayıcı/güncelleme filtreleri
 - Açık ve koyu tema; seçim yerel olarak saklanır
 - Depo yönetimi: Flathub korunur, özel Flatpak kullanıcı depoları eklenebilir
-- Homebrew benzeri ek kaynaklar için "Yakında" görünümü
 - Adwaita Sans fontu uygulamaya gömülüdür; harici font isteği yapılmaz
 
 ## İlk açılış ve sistem hazırlığı
@@ -76,11 +78,37 @@ Flathub API'si arama, öneriler, kategoriler ve uygulama ayrıntıları için;
 ODRS ise topluluk puanları ve yorumları için kullanılır. HTTP istekleri Rust
 tarafında `reqwest` ile yapılır.
 
+## Snap
+
+Snap Store kataloğu Snap Store API'sinden aranır. Yerel işlemler için `snapd`
+kurulu ve çalışır olmalıdır; Macro Store Snap'i kendisi kurmaz.
+
+- Arama sonuçlarında yalnızca `strict` confinement paketleri kurulum için sunulur.
+- Kurulum, kaldırma ve yenileme `snap` komutuyla sistem kapsamında yapılır;
+  açık kullanıcı eyleminde Polkit (`pkexec`) yetkilendirme penceresi açılabilir.
+- Snap işlemleri Flatpak'ın `--user` kapsamından farklıdır. Macro Store'u root
+  olarak çalıştırmayın.
+- Snap Store ayrıntılarında topluluk puanı/yorum, ekran görüntüsü ve indirme
+  istatistikleri sunulmaz.
+
+## Homebrew (Linuxbrew)
+
+Linux'ta mevcut Homebrew kurulumu kullanılır; Macro Store Homebrew kurulumunu
+veya ortamı otomatik değiştirmez. `brew` komutu `PATH` veya yaygın Linuxbrew
+öneklerinde bulunmalıdır. Paket işlemleri root olarak çalıştırılmaz.
+
+- Formula'lar ve Homebrew üstverisinde Linux desteği açıkça belirtilen cask'ler
+  aranır.
+- Arayüzde formula/cask kimlikleri ayrıdır; aynı adlı paketler çakışmaz.
+- Arama sırasında otomatik `brew update` çalıştırılmaz.
+- Homebrew katalog araması/ayrıntıları için Linux Homebrew kurulumunun hazır
+  olması gerekir.
+
 ## Gereksinimler
 
 - Flatpak 1.12 veya üzeri (ilk açılışta kurulabilir)
 - Çalışma zamanında GTK 3 ve WebKitGTK 4.1
-- Derleme için Rust, Tauri 2 CLI ve ilgili geliştirme paketleri
+- Derleme için Rust 1.90 veya üzeri, Tauri 2 CLI ve geliştirme paketleri
 
 Paketler, Tauri'nin ürettiği bağımlılık listesiyle birlikte gelir. `.deb` ve
 `.rpm` kurulumları sistemdeki WebKitGTK 4.1 ve GTK 3 kütüphanelerini kullanır.
@@ -138,9 +166,9 @@ cd src-tauri
 cargo tauri dev
 
 # Yalnızca arka uç denetimleri
-cargo check --all-targets
-cargo test
-cargo clippy --all-targets -- -D warnings
+cargo check --locked --all-targets
+cargo test --locked --all-targets
+cargo clippy --locked --all-targets -- -D warnings
 ```
 
 Arayüz, Tauri olmadan da tarayıcıda açılabilir. `ui/index.html` dosyasını yerel
@@ -148,12 +176,29 @@ bir HTTP sunucusundan açtığınızda demo verisiyle çalışır. Tarayıcı ö
 Flathub/ODRS isteklerini yerel bir proxy üzerinden yapar; gerçek uygulamada bu
 yol kullanılmaz.
 
+## CI ve sürüm yayınları
+
+`.github/workflows/ci.yml`, pull request'lerde ve `main` dalına push'larda JS
+sözdizimini, Rust biçimlendirme/derleme/test/Clippy adımlarını ve Linux `.deb`,
+`.rpm`, AppImage üretimini denetler. `.github/workflows/release.yml`, `vX.Y.Z`
+etiketinin Cargo ve Tauri sürümleriyle eşleşmesini doğrular; denetimleri ve
+paket üretimini tekrar çalıştırıp üç paketi SHA-256 toplamlarıyla GitHub
+Release'e yükler.
+
+Yayın tetikleyicisi için etiket sürümü `src-tauri/Cargo.toml` ve
+`src-tauri/tauri.conf.json` içindeki sürümle aynı olmalıdır.
+
+
 ## Paket üretme
 
 ```bash
 cd src-tauri
 cargo tauri build --bundles deb,rpm
 ```
+
+Release profili çalışma hızı için `opt-level=3`, `thin LTO` ve tek codegen
+birimi kullanır; en küçük ikili dosya boyutu yerine çalıştırma performansını
+önceler.
 
 Çıktılar:
 
@@ -184,39 +229,49 @@ ui/                       Saf HTML/CSS/JS arayüz
   theme-init.js           İlk boyamadan önce temayı uygular
   fonts/                  Gömülü Adwaita Sans fontu
 src-tauri/
-  src/lib.rs              Flathub API, ODRS, Flatpak ve ilk kurulum komutları
+  src/lib.rs              Sağlayıcı entegrasyonu, Flathub API/ODRS ve Flatpak
+  src/snap.rs             Snap Store araması, snapd envanteri ve işlemleri
+  src/brew.rs             Linux Homebrew araması, formula/cask ve işlemler
   tauri.conf.json         Pencere, CSP ve deb/rpm/AppImage paketleme ayarları
   capabilities/           Tauri yetkileri
   icons/                  Uygulama simgeleri
+.github/workflows/
+  ci.yml                  Linux denetimleri ve paket doğrulaması
+  release.yml             Sürüm etiketi doğrulama ve GitHub Release
 README.md
 LICENSE
 ```
 
 ## Güvenlik notları
 
-- Uygulama kimlikleri ve depo adları katı kurallarla doğrulanır.
+- Paket kimlikleri ve depo adları katı kurallarla doğrulanır.
 - Hiçbir komut `sh -c` ile çalıştırılmaz; argümanlar ayrı ayrı geçirilir.
-- Arama ifadeleri baştaki `-` ve kontrol karakterlerine karşı denetlenir.
-- Flatpak uygulama komutları kullanıcı kapsamıyla sınırlıdır; mağaza root olarak
+- Arama ifadeleri seçenek enjeksiyonuna ve kontrol karakterlerine karşı denetlenir.
+- Flatpak uygulama işlemleri kullanıcı kapsamıyla sınırlıdır; mağaza root olarak
   çalışmaz.
-- Sistem paket yöneticisi yalnızca ilk kurulumda eksik Flatpak'ı kurmak için
-  `pkexec` ile çağrılır; Flatpak uygulamaları yine kullanıcı kapsamında kurulur.
-- Yalnızca kullanıcı kapsamındaki özel depolar kaldırılabilir; Flathub korunur.
+- İlk Flatpak kurulumu için sistem paket yöneticisi yalnızca `pkexec` ile çağrılır.
+- Snap işlemleri sistem kapsamındadır; `pkexec snap` yalnızca açık kullanıcı
+  eyleminde çalışır ve Flatpak'ın `--user` sınırlarıyla karıştırılmaz.
+- Homebrew işlemleri root olarak çalıştırılmaz.
+- Yalnızca kullanıcı kapsamındaki özel Flatpak depoları kaldırılabilir; Flathub korunur.
 - AppImage ortam değişkenleri (`LD_LIBRARY_PATH`, `LD_PRELOAD` vb.) sistem
   araçları çağrılırken temizlenir.
-- Aynı anda tek Flatpak işlemine izin verilir.
+- Aynı anda tüm sağlayıcılar arasında tek paket işlemi yürütülür.
 
 ## Bilinen sınırlar
 
-- Mağaza yalnızca Flathub kataloğunu kullanır; Snap, AUR veya yerel paket
-  yöneticileri mağaza özelliği olarak desteklenmez.
-- İlk kurulum yalnızca desteklenen paket yöneticilerinde otomatiktir; diğer
-  sistemlerde manuel komut gösterilir.
+- Öne çıkanlar, kategoriler ve topluluk yorumları Flathub/ODRS kataloğuna dayanır;
+  Snap ve Homebrew ayrı arama sağlayıcılarıdır.
+- Snap işlemleri için `snapd`, Homebrew işlemleri için Linuxbrew kurulu olmalıdır;
+  bu bağımlılıklar otomatik kurulmaz.
+- Snap Store ayrıntılarında ODRS puanı/yorumu yoktur; Snap listesi sistem
+  kapsamındaki paketleri gösterir.
+- Homebrew yalnızca Linux desteğini üstverisinde açıkça bildiren cask'leri sunar.
+- İlk Flatpak kurulumu yalnızca desteklenen dağıtım ailelerinde otomatiktir;
+  diğer sistemlerde manuel komut gösterilir.
 - Özel Flatpak depoları yalnızca kullanıcı kapsamında yönetilebilir.
-- Homebrew ve benzeri ek kaynaklar henüz uygulanmadı.
-- Uygulama açıklamaları ve ekran görüntüleri Flathub'un sağladığı dille
-  sınırlıdır; bazı uygulamalarda Türkçe çeviri bulunmayabilir.
-- Topluluk yorumları ODRS'ye bağlıdır; her uygulama için yorum bulunmayabilir.
+- Açıklama, sürüm ve ekran görüntüsü dilleri ilgili kataloğun sağladığıyla
+  sınırlıdır; her sağlayıcı her ayrıntıyı sağlamaz.
 
 ## Lisans
 
