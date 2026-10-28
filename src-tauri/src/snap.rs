@@ -39,6 +39,7 @@ pub struct ProviderApp {
     pub icon: Option<String>,
     pub installed: bool,
     pub update_available: bool,
+    pub channel: Option<String>,
     pub category: Option<String>,
     pub package_type: Option<String>,
 }
@@ -441,6 +442,11 @@ fn search_app(snap: &Value, state: &SnapSnapshot) -> Option<ProviderApp> {
         icon: snap_icon(snap),
         installed,
         update_available: installed && state.updates.contains(id),
+        channel: state
+            .apps
+            .iter()
+            .find(|app| app.id == id)
+            .and_then(|app| app.channel.clone()),
         category: category_name(snap),
         package_type: Some("snap".to_string()),
     })
@@ -495,6 +501,7 @@ fn parse_installed_rows(output: &str) -> Result<Vec<ProviderApp>, String> {
                 .map(|value| truncate_text(value, 120))
                 .unwrap_or_default(),
             version: truncate_text(fields[1], 100),
+            channel: (!fields[3].eq("-") && fields[3].len() <= 100).then(|| fields[3].to_string()),
             icon: None,
             installed: true,
             update_available: false,
@@ -612,14 +619,6 @@ fn read_snapshot() -> Result<SnapSnapshot, String> {
     })
 }
 
-fn empty_snapshot() -> SnapSnapshot {
-    SnapSnapshot {
-        apps: Vec::new(),
-        installed: HashSet::new(),
-        updates: HashSet::new(),
-    }
-}
-
 fn snapshot() -> Result<Arc<SnapSnapshot>, String> {
     let cache = SNAPSHOT_CACHE.get_or_init(|| Mutex::new(None));
     let mut cache = cache
@@ -636,7 +635,7 @@ fn snapshot() -> Result<Arc<SnapSnapshot>, String> {
     Ok(refreshed)
 }
 
-fn invalidate_snapshot() {
+pub fn invalidate_cache() {
     if let Some(cache) = SNAPSHOT_CACHE.get() {
         let mut cache = cache
             .lock()
@@ -697,7 +696,7 @@ pub async fn search(query: &str) -> Result<Vec<ProviderApp>, String> {
     let state = tokio::task::spawn_blocking(snapshot)
         .await
         .map_err(|error| format!("Snap envanteri okunamadı: {error}"))?
-        .unwrap_or_else(|_| Arc::new(empty_snapshot()));
+        .map_err(|error| format!("Snap envanteri okunamadı: {error}"))?;
     let response = api_request(http_client()?, SNAP_FIND_URL)
         .query(&[("q", query), ("scope", "wide"), ("confinement", "strict")])
         .timeout(SEARCH_TIMEOUT)
@@ -771,7 +770,7 @@ pub async fn detail(id: &str) -> Result<ProviderDetail, String> {
     let state = tokio::task::spawn_blocking(snapshot)
         .await
         .map_err(|error| format!("Snap envanteri okunamadı: {error}"))?
-        .unwrap_or_else(|_| Arc::new(empty_snapshot()));
+        .map_err(|error| format!("Snap envanteri okunamadı: {error}"))?;
     with_snap_info(id, "Snap Store uygulama ayrıntıları", |snap| {
         let app = search_app(snap, &state)
             .ok_or_else(|| "Snap Store uygulama kimliği geçersiz.".to_string())?;
@@ -820,7 +819,7 @@ pub async fn action(id: &str, action: &str) -> Result<String, String> {
     let id = id.to_string();
     tokio::task::spawn_blocking(move || {
         let result = run_snap(&[verb, &id], ACTION_TIMEOUT, false, true);
-        invalidate_snapshot();
+        invalidate_cache();
         let output = result?;
         if !output.status.success() {
             return Err(command_failure(&format!("snap {verb} {id}"), &output));
@@ -888,6 +887,7 @@ mod tests {
         assert_eq!(apps.len(), 1);
         assert_eq!(apps[0].id, "firefox");
         assert_eq!(apps[0].version, "128.0");
+        assert_eq!(apps[0].channel.as_deref(), Some("latest/stable"));
         assert!(apps[0].installed);
         assert!(parse_installed_rows("unexpected output").is_err());
     }

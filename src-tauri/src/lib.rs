@@ -137,9 +137,31 @@ struct AppItem {
     icon: Option<String>,
     installed: bool,
     update_available: bool,
+    pinned: bool,
+    channel: Option<String>,
     category: Option<String>,
     monthly_installs: Option<u64>,
     hero_image: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderIssue {
+    provider: String,
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InstalledAppsResponse {
+    apps: Vec<AppItem>,
+    provider_errors: Vec<ProviderIssue>,
+}
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchAppsResponse {
+    apps: Vec<AppItem>,
+    provider_errors: Vec<ProviderIssue>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1017,12 +1039,76 @@ fn installed_apps(snapshot: &FlatpakSnapshot) -> Vec<AppItem> {
                     .or_else(|| Some(flatpak_icon_url(&installed.app_id))),
                 installed: true,
                 update_available,
+                pinned: false,
+                channel: None,
                 category: None,
                 monthly_installs: None,
                 hero_image: None,
             }
         })
         .collect()
+}
+
+fn installed_apps_response(
+    providers: [(&str, Result<Vec<AppItem>, String>); 3],
+) -> InstalledAppsResponse {
+    let mut response = InstalledAppsResponse {
+        apps: Vec::new(),
+        provider_errors: Vec::new(),
+    };
+    for (provider, result) in providers {
+        match result {
+            Ok(apps) => response.apps.extend(apps),
+            Err(message) => response.provider_errors.push(ProviderIssue {
+                provider: provider.to_string(),
+                message,
+            }),
+        }
+    }
+    response
+}
+fn search_apps_response(
+    providers: [(&str, Result<Vec<AppItem>, String>); 3],
+) -> Result<SearchAppsResponse, String> {
+    let mut sources = Vec::with_capacity(3);
+    let mut response = SearchAppsResponse {
+        apps: Vec::with_capacity(SEARCH_LIMIT),
+        provider_errors: Vec::new(),
+    };
+    for (provider, result) in providers {
+        match result {
+            Ok(apps) => sources.push(apps),
+            Err(message) => response.provider_errors.push(ProviderIssue {
+                provider: provider.to_string(),
+                message,
+            }),
+        }
+    }
+    if sources.is_empty() {
+        return Err(response
+            .provider_errors
+            .iter()
+            .map(|issue| format!("{}: {}", issue.provider, issue.message))
+            .collect::<Vec<_>>()
+            .join(" · "));
+    }
+
+    let max_source_len = sources.iter().map(Vec::len).max().unwrap_or(0);
+    let mut seen = HashSet::with_capacity(SEARCH_LIMIT);
+    for index in 0..max_source_len {
+        for source in &sources {
+            let Some(item) = source.get(index) else {
+                continue;
+            };
+            if seen.insert((item.provider.clone(), item.id.clone())) {
+                response.apps.push(item.clone());
+                if response.apps.len() == SEARCH_LIMIT {
+                    return Ok(response);
+                }
+            }
+        }
+    }
+    Ok(response)
 }
 
 fn is_flatpak_runtime_id(app_id: &str) -> bool {
@@ -1113,6 +1199,8 @@ fn app_from_api(
         icon: safe_icon(app.icon, &id),
         installed: is_installed,
         update_available,
+        pinned: false,
+        channel: None,
         category,
         monthly_installs: app.installs_last_month,
         hero_image: None,
@@ -1134,6 +1222,8 @@ fn app_from_snap(item: snap::ProviderApp) -> AppItem {
         icon: item.icon,
         installed: item.installed,
         update_available: item.update_available,
+        pinned: false,
+        channel: item.channel,
         category: item.category,
         monthly_installs: None,
         hero_image: None,
@@ -1152,6 +1242,8 @@ fn app_from_brew(item: brew::ProviderApp) -> AppItem {
         icon: item.icon,
         installed: item.installed,
         update_available: item.update_available,
+        pinned: item.pinned,
+        channel: None,
         category: item.category,
         monthly_installs: None,
         hero_image: None,
@@ -1171,6 +1263,8 @@ fn fallback_app(id: &str, installed: &HashSet<String>, updates: &HashSet<String>
         icon: Some(flatpak_icon_url(id)),
         installed: is_installed,
         update_available: is_installed && updates.contains(id),
+        pinned: false,
+        channel: None,
         category: None,
         monthly_installs: None,
         hero_image: None,
@@ -1283,6 +1377,8 @@ async fn fetch_appstream_item(
                 icon,
                 installed: is_installed,
                 update_available,
+                pinned: false,
+                channel: None,
                 category,
                 monthly_installs: None,
                 hero_image,
@@ -1362,6 +1458,8 @@ fn flatpak_search_fallback(
             icon: Some(flatpak_icon_url(app_id)),
             installed: is_installed,
             update_available: is_installed && updates.contains(app_id),
+            pinned: false,
+            channel: None,
             category: None,
             monthly_installs: None,
             hero_image: None,
@@ -1697,52 +1795,35 @@ async fn search_flatpak(
 }
 
 #[tauri::command]
-async fn search_apps(query: String) -> Result<Vec<AppItem>, String> {
+async fn search_apps(query: String) -> Result<SearchAppsResponse, String> {
     let query = valid_query(&query)?;
-    let snapshot = flatpak_snapshot_async().await?;
-    let flatpak = search_flatpak(query.clone(), snapshot);
+    let flatpak_query = query.clone();
+    let flatpak = async move {
+        match flatpak_snapshot_async().await {
+            Ok(snapshot) => search_flatpak(flatpak_query, snapshot).await,
+            Err(error) => Err(format!("Flatpak envanteri alınamadı: {error}")),
+        }
+    };
     let snap = snap::search(&query);
     let brew = brew::search(&query);
     let (flatpak, snap, brew) = tokio::join!(flatpak, snap, brew);
-    let mut sources = Vec::with_capacity(3);
-    let mut errors = Vec::new();
-    for result in [
-        flatpak.map_err(|error| format!("Flathub: {error}")),
-        snap.map(|apps| apps.into_iter().map(app_from_snap).collect())
-            .map_err(|error| format!("Snap: {error}")),
-        brew.map(|apps| apps.into_iter().map(app_from_brew).collect())
-            .map_err(|error| format!("Homebrew: {error}")),
-    ] {
-        match result {
-            Ok(apps) => sources.push(apps),
-            Err(error) => errors.push(error),
-        }
-    }
-    if sources.is_empty() {
-        return Err(errors.join(" · "));
-    }
 
-    let max_source_len = sources.iter().map(Vec::len).max().unwrap_or(0);
-    let mut results = Vec::with_capacity(SEARCH_LIMIT);
-    let mut seen = HashSet::with_capacity(SEARCH_LIMIT);
-    for index in 0..max_source_len {
-        for source in &sources {
-            let Some(item) = source.get(index) else {
-                continue;
-            };
-            let key = (item.provider.clone(), item.id.clone());
-            if seen.insert(key) {
-                results.push(item.clone());
-                if results.len() == SEARCH_LIMIT {
-                    return Ok(results);
-                }
-            }
-        }
-    }
-    if results.is_empty() && !errors.is_empty() {
-        return Err(errors.join(" · "));
-    }
-    Ok(results)
+    search_apps_response([
+        (
+            "Flatpak",
+            flatpak.map_err(|error| format!("Flathub: {error}")),
+        ),
+        (
+            "Snap",
+            snap.map(|apps| apps.into_iter().map(app_from_snap).collect())
+                .map_err(|error| format!("Snap: {error}")),
+        ),
+        (
+            "Homebrew",
+            brew.map(|apps| apps.into_iter().map(app_from_brew).collect())
+                .map_err(|error| format!("Homebrew: {error}")),
+        ),
+    ])
 }
 
 #[tauri::command]
@@ -1875,6 +1956,8 @@ async fn get_flatpak_app_detail(app_id: String) -> Result<AppDetail, String> {
         icon: safe_icon(appstream.icon.clone(), &app_id),
         installed: is_installed,
         update_available: is_installed && snapshot.updates.contains(&app_id),
+        pinned: false,
+        channel: None,
         category: main_category_from_appstream(&appstream.categories),
         monthly_installs,
         hero_image: screenshots.first().map(|item| item.url.clone()),
@@ -1971,7 +2054,7 @@ async fn get_flatpak_app_detail(app_id: String) -> Result<AppDetail, String> {
 }
 
 #[tauri::command]
-async fn list_installed_apps() -> Result<Vec<AppItem>, String> {
+async fn list_installed_apps() -> InstalledAppsResponse {
     let flatpak = tokio::task::spawn_blocking(|| -> Result<Vec<AppItem>, String> {
         if flatpak_available() {
             Ok(installed_apps(&flatpak_snapshot()))
@@ -1998,10 +2081,23 @@ async fn list_installed_apps() -> Result<Vec<AppItem>, String> {
         }
     });
     let (flatpak, snap, brew) = tokio::join!(flatpak, snap, brew);
-    let mut apps = flatpak.map_err(|error| format!("Flatpak envanteri okunamadı: {error}"))??;
-    apps.extend(snap.map_err(|error| format!("Snap envanteri okunamadı: {error}"))??);
-    apps.extend(brew.map_err(|error| format!("Homebrew envanteri okunamadı: {error}"))??);
-    Ok(apps)
+    let flatpak = flatpak
+        .map_err(|error| format!("Flatpak envanteri okunamadı: {error}"))
+        .and_then(|result| result);
+    let snap = snap
+        .map_err(|error| format!("Snap envanteri okunamadı: {error}"))
+        .and_then(|result| result);
+    let brew = brew
+        .map_err(|error| format!("Homebrew envanteri okunamadı: {error}"))
+        .and_then(|result| result);
+    installed_apps_response([("flatpak", flatpak), ("snap", snap), ("brew", brew)])
+}
+
+#[tauri::command]
+fn refresh_provider_caches() {
+    invalidate_flatpak_cache();
+    snap::invalidate_cache();
+    brew::invalidate_cache();
 }
 
 #[tauri::command]
@@ -2517,6 +2613,7 @@ pub fn run() {
             get_category,
             get_app_detail,
             list_installed_apps,
+            refresh_provider_caches,
             list_flatpak_remotes,
             add_flatpak_remote,
             remove_flatpak_remote,
@@ -2644,5 +2741,74 @@ mod tests {
             );
         }
         assert!(package_plan("unknown-manager").is_none());
+    }
+
+    #[test]
+    fn installed_inventory_keeps_successful_providers_when_another_fails() {
+        let app = |provider: &str, id: &str| AppItem {
+            id: id.to_string(),
+            provider: provider.to_string(),
+            package_type: None,
+            name: id.to_string(),
+            summary: String::new(),
+            developer: String::new(),
+            version: String::new(),
+            icon: None,
+            installed: true,
+            update_available: false,
+            pinned: false,
+            channel: None,
+            category: None,
+            monthly_installs: None,
+            hero_image: None,
+        };
+        let response = installed_apps_response([
+            ("flatpak", Ok(vec![app("flatpak", "org.example.App")])),
+            ("snap", Err("snapd kapalı".to_string())),
+            ("brew", Ok(vec![app("brew", "formula/example")])),
+        ]);
+
+        assert_eq!(
+            response
+                .apps
+                .iter()
+                .map(|item| item.provider.as_str())
+                .collect::<Vec<_>>(),
+            ["flatpak", "brew"]
+        );
+        assert_eq!(response.provider_errors.len(), 1);
+        assert_eq!(response.provider_errors[0].provider, "snap");
+        assert_eq!(response.provider_errors[0].message, "snapd kapalı");
+    }
+    #[test]
+    fn search_results_preserve_successful_hits_and_provider_errors() {
+        let app = AppItem {
+            id: "formula/example".to_string(),
+            provider: "brew".to_string(),
+            package_type: Some("formula".to_string()),
+            name: "Example".to_string(),
+            summary: String::new(),
+            developer: String::new(),
+            version: "1.0".to_string(),
+            icon: None,
+            installed: false,
+            update_available: false,
+            pinned: false,
+            channel: None,
+            category: None,
+            monthly_installs: None,
+            hero_image: None,
+        };
+        let response = search_apps_response([
+            ("Flatpak", Err("Flathub timeout".to_string())),
+            ("Snap", Ok(Vec::new())),
+            ("Homebrew", Ok(vec![app])),
+        ])
+        .expect("one available provider should preserve the response");
+
+        assert_eq!(response.apps.len(), 1);
+        assert_eq!(response.apps[0].provider, "brew");
+        assert_eq!(response.provider_errors.len(), 1);
+        assert_eq!(response.provider_errors[0].provider, "Flatpak");
     }
 }

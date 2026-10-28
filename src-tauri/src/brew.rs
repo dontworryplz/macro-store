@@ -35,6 +35,7 @@ pub struct ProviderApp {
     pub icon: Option<String>,
     pub installed: bool,
     pub update_available: bool,
+    pub pinned: bool,
     pub category: Option<String>,
     pub package_type: Option<String>,
 }
@@ -569,6 +570,10 @@ fn build_app(
             .unwrap_or_default(),
         icon: None,
         installed,
+        pinned: record
+            .and_then(|value| value.get("pinned"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         update_available: installed && update_available,
         category: None,
         package_type: Some(kind.type_name().to_string()),
@@ -800,7 +805,7 @@ fn installed_cached() -> Result<Arc<Vec<ProviderApp>>, String> {
     Ok(apps)
 }
 
-fn invalidate_installed_cache() {
+pub fn invalidate_cache() {
     if let Some(cache) = INSTALLED_CACHE.get() {
         if let Ok(mut cache) = cache.lock() {
             *cache = None;
@@ -814,6 +819,7 @@ fn apply_installed_status(apps: &mut [ProviderApp], installed: &[ProviderApp]) {
     for app in apps {
         if let Some(current) = installed.get(app.id.as_str()) {
             app.installed = true;
+            app.pinned = current.pinned;
             app.update_available = current.update_available;
             if !current.version.is_empty() {
                 app.version.clone_from(&current.version);
@@ -965,7 +971,7 @@ pub async fn action(id: &str, action: &str) -> Result<String, String> {
     let result = task::spawn_blocking(move || action_sync(kind, &token, &action))
         .await
         .map_err(|error| format!("Homebrew işlemi tamamlanamadı: {error}"))?;
-    invalidate_installed_cache();
+    invalidate_cache();
     result
 }
 
@@ -987,6 +993,7 @@ mod tests {
             icon: None,
             installed,
             update_available,
+            pinned: false,
             category: None,
             package_type: None,
         }
@@ -1008,14 +1015,16 @@ mod tests {
             app("cask/hello", false, false, "2.0"),
             app("formula/new", false, false, "1.0"),
         ];
-        let installed = vec![
+        let mut installed = vec![
             app("formula/hello", true, true, "1.0"),
             app("cask/hello", true, false, "2.0"),
         ];
+        installed[0].pinned = true;
         apply_installed_status(&mut search, &installed);
         assert!(search[0].installed && search[0].update_available);
         assert_eq!(search[0].version, "1.0");
         assert!(search[1].installed && !search[1].update_available);
+        assert!(search[0].pinned);
         assert!(!search[2].installed);
     }
 
@@ -1033,5 +1042,25 @@ mod tests {
         assert!(!linux_cask_supported(
             &json!({"artifacts": [{"app": ["Example.app"]}]})
         ));
+    }
+    #[test]
+    fn installed_formula_preserves_pinned_state() {
+        let record = json!({
+            "name": "example",
+            "installed": [{"version": "1.0"}],
+            "pinned": true
+        });
+        let app = build_app(Some(&record), PackageKind::Formula, "example", true, false);
+        assert!(app.installed);
+        assert!(app.pinned);
+
+        let unpinned = build_app(
+            Some(&json!({"name": "other", "installed": [{"version": "1.0"}]})),
+            PackageKind::Formula,
+            "other",
+            true,
+            false,
+        );
+        assert!(!unpinned.pinned);
     }
 }

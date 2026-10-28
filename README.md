@@ -21,6 +21,12 @@ kurmak için çağrılır.
 - Snap Store araması ve Snap paket işlemleri (sistem kapsamında; Polkit gerekebilir)
 - Linux Homebrew formula ve Linux desteği bildiren cask paketleri
 - Yüklü uygulamalar listesi ve sağlayıcı/güncelleme filtreleri
+- Yüklü uygulamalar listesi 40'arlı parçalar halinde açılır; sağlayıcı hataları
+  başarılı kaynakların sonuçlarını gizlemez.
+- Snap izleme kanalı ve Homebrew sabitlenmiş formula durumu uygulama
+  ayrıntılarında gösterilir.
+- **Yenile** sağlayıcı önbelleklerini temizler; normal listeleme 15 saniyelik
+  kısa bir önbellek kullanır.
 - Açık ve koyu tema; seçim yerel olarak saklanır
 - Depo yönetimi: Flathub korunur, özel Flatpak kullanıcı depoları eklenebilir
 - Adwaita Sans fontu uygulamaya gömülüdür; harici font isteği yapılmaz
@@ -183,11 +189,12 @@ sözdizimini, Rust biçimlendirme/derleme/test/Clippy adımlarını ve Linux `.d
 `.rpm`, AppImage üretimini denetler. `.github/workflows/release.yml`, `vX.Y.Z`
 etiketinin Cargo ve Tauri sürümleriyle eşleşmesini doğrular; denetimleri ve
 paket üretimini tekrar çalıştırıp üç paketi SHA-256 toplamlarıyla GitHub
-Release'e yükler.
+Release'e yükler. Her CI çalışması üretilen `.deb`, `.rpm` ve AppImage dosyalarını
+14 gün süreyle Actions artifacts bölümünde indirilebilir tutar. Tauri CLI
+`2.12.4` sürümüne sabitlenir ve Cargo cache'iyle birlikte önbelleğe alınır.
 
 Yayın tetikleyicisi için etiket sürümü `src-tauri/Cargo.toml` ve
 `src-tauri/tauri.conf.json` içindeki sürümle aynı olmalıdır.
-
 
 ## Paket üretme
 

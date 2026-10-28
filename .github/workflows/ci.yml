@@ -15,17 +15,17 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Check out source
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@1.90.0
+        uses: dtolnay/rust-toolchain@7dcc700092a1a8b9c17ba0e140b4e34e93000946 # 1.90.0
         with:
           components: rustfmt, clippy
 
       - name: Set up Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
 
@@ -50,13 +50,16 @@ jobs:
         run: echo "version=$(rustc --version | cut -d ' ' -f 2)" >> "$GITHUB_OUTPUT"
 
       - name: Cache Cargo
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
+            ~/.cargo/bin/cargo-tauri
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
             src-tauri/target
-          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ steps.rust.outputs.version }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ steps.rust.outputs.version }}-${{ hashFiles('src-tauri/Cargo.lock') }}-tauri-cli-2.12.4
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-cargo-${{ steps.rust.outputs.version }}-
 
@@ -80,8 +83,18 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "^2.0.0" --locked
+        run: if ! command -v cargo-tauri >/dev/null 2>&1; then cargo install tauri-cli --version "2.12.4" --locked; fi
 
       - name: Build Debian, RPM, and AppImage packages
         working-directory: src-tauri
         run: cargo tauri build --ci --bundles deb,rpm,appimage
+      - name: Upload Linux packages
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macro-store-linux-packages
+          path: |
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/rpm/*.rpm
+            src-tauri/target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+          retention-days: 14

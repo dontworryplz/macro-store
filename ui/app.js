@@ -23,6 +23,7 @@ const PROVIDER_FILTERS = [
   { value: "snap", label: "Snap" },
   { value: "brew", label: "Homebrew" },
 ];
+const INSTALLED_PAGE_SIZE = 40;
 
 const FALLBACK_ICON = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(
   `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" fill="none">
@@ -180,6 +181,7 @@ const state = {
   searchResults: [],
   searching: false,
   searchError: "",
+  searchProviderErrors: [],
   searchSeq: 0,
   searchProvider: "all",
   discover: null,
@@ -190,6 +192,8 @@ const state = {
   installedLoaded: false,
   installedLoading: false,
   installedError: "",
+  installedProviderErrors: [],
+  installedVisibleCount: INSTALLED_PAGE_SIZE,
   installedSeq: 0,
   updatesOnly: false,
   installedProvider: "all",
@@ -417,6 +421,7 @@ function appIconHtml(app, extraClass = "") {
 function appTagsHtml(app, context = "") {
   const tags = [];
   if (app.updateAvailable) tags.push('<span class="tag tag-update">Güncelleme</span>');
+  if (app.pinned) tags.push('<span class="tag">Sabitlenmiş</span>');
   if (context === "search" && app.installed) tags.push('<span class="tag">Yüklü</span>');
   return tags.join("");
 }
@@ -426,6 +431,7 @@ function metaParts(app) {
   if (app.developer) parts.push(app.developer);
   if (app.category) parts.push(categoryName(app.category));
   if (app.installed && app.version) parts.push(`v${app.version}`);
+  if (app.channel) parts.push(`Snap ${app.channel}`);
   if (app.monthlyInstalls) parts.push(`${formatCount(app.monthlyInstalls)} aylık kurulum`);
   return parts;
 }
@@ -1224,11 +1230,15 @@ async function loadInstalled(force = false, silent = false) {
   renderIf("installed", renderInstalled);
 
   try {
-    const list = await invoke("list_installed_apps");
+    const response = await invoke("list_installed_apps");
     if (seq !== state.installedSeq) return;
-    state.installed = Array.isArray(list)
-      ? [...list].sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "tr", { sensitivity: "base" }))
+    state.installed = Array.isArray(response?.apps)
+      ? [...response.apps].sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "tr", { sensitivity: "base" }))
       : [];
+    state.installedProviderErrors = Array.isArray(response?.providerErrors)
+      ? response.providerErrors
+      : [];
+    state.installedVisibleCount = INSTALLED_PAGE_SIZE;
     state.installedLoaded = true;
     state.installedError = "";
   } catch (err) {
@@ -1255,6 +1265,7 @@ function resetSearch({ goDiscover = false, focus = false } = {}) {
   state.searchResults = [];
   state.searching = false;
   state.searchError = "";
+  state.searchProviderErrors = [];
   els.searchInput.value = "";
   if (goDiscover && state.route.name === "search") {
     navigate({ name: "discover" }, { root: true });
@@ -1277,6 +1288,7 @@ async function runSearch(rawQuery) {
   if (query.length < 2) {
     state.query = query;
     state.searchResults = [];
+    state.searchProviderErrors = [];
     state.searching = false;
     state.searchError = "Arama için en az 2 karakter yazın.";
     els.searchInput.value = query;
@@ -1289,15 +1301,19 @@ async function runSearch(rawQuery) {
   state.searchResults = [];
   state.searching = true;
   state.searchError = "";
+  state.searchProviderErrors = [];
   els.searchInput.value = query;
 
   if (state.route.name !== "search") navigate({ name: "search" });
   else renderSearch();
 
   try {
-    const results = await invoke("search_apps", { query });
+    const response = await invoke("search_apps", { query });
     if (seq !== state.searchSeq) return;
-    state.searchResults = Array.isArray(results) ? results : [];
+    state.searchResults = Array.isArray(response?.apps) ? response.apps : [];
+    state.searchProviderErrors = Array.isArray(response?.providerErrors)
+      ? response.providerErrors
+      : [];
   } catch (err) {
     if (seq !== state.searchSeq) return;
     state.searchError = errText(err);
@@ -1453,6 +1469,7 @@ async function refreshCurrent() {
   if (els.refreshButton.classList.contains("is-spinning")) return;
   els.refreshButton.classList.add("is-spinning");
   try {
+    await invoke("refresh_provider_caches");
     const route = state.route;
     if (route.name === "discover") await loadDiscover(true);
     else if (route.name === "search" && state.query) await runSearch(state.query);
@@ -1463,7 +1480,11 @@ async function refreshCurrent() {
       await loadStoreInfo();
       await loadRemotes(true);
     }
-    toast("Yenilendi.", "info");
+    const hasProviderErrors = route.name === "installed" && state.installedProviderErrors.length > 0;
+    toast(
+      hasProviderErrors ? `${state.installedProviderErrors.length} paket kaynağı yenilenemedi.` : "Yenilendi.",
+      hasProviderErrors ? "error" : "info",
+    );
   } catch (err) {
     toast(errText(err), "error");
   } finally {
@@ -1633,6 +1654,9 @@ function renderSearch() {
   const query = state.query;
   const visible = state.searchResults.filter(app => providerMatches(app, state.searchProvider));
   const count = visible.length;
+  const providerErrors = state.searchProviderErrors.filter(issue =>
+    state.searchProvider === "all" || issue.provider === providerName(state.searchProvider),
+  );
   const hasResults = state.searchResults.length > 0;
   const tooShort = query.length < 2;
   const meta = tooShort
@@ -1659,6 +1683,13 @@ function renderSearch() {
       retry: "search",
       icon: ICON.warning,
     });
+  } else if (!count && providerErrors.length && state.searchProvider !== "all") {
+    body = stateHtml({
+      title: `${providerName(state.searchProvider)} yanıt vermedi`,
+      text: providerErrors.map(issue => issue.message).join(" · "),
+      retry: "search",
+      icon: ICON.warning,
+    });
   } else if (!count) {
     body = stateHtml({
       title: hasResults ? "Bu sağlayıcıda sonuç yok" : "Sonuç bulunamadı",
@@ -1671,6 +1702,12 @@ function renderSearch() {
   } else {
     body = `<div class="app-list">${visible.map(app => appRowHtml(app, "search")).join("")}</div>`;
   }
+  const providerNotice = providerErrors.length && (count > 0 || state.searchProvider === "all")
+    ? `<div class="notice" role="status" aria-live="polite">
+        ${ICON.warning}
+        <span><strong>Bazı paket kaynakları yenilenemedi.</strong> ${escapeHtml(providerErrors.map(issue => `${issue.provider}: ${issue.message}`).join(" · "))}</span>
+      </div>`
+    : "";
 
   const controls = tooShort
     ? `<p class="view-note">${escapeHtml(meta)}</p>`
@@ -1688,6 +1725,7 @@ function renderSearch() {
       </div>
       ${controls}
     </header>
+    ${providerNotice}
     ${body}`;
 }
 
@@ -1777,6 +1815,9 @@ function renderInstalled() {
   const visible = state.updatesOnly
     ? providerApps.filter(app => app.updateAvailable)
     : providerApps;
+  const providerErrors = state.installedProviderErrors.filter(issue =>
+    provider === "all" || issue.provider === provider,
+  );
 
   let body;
   if (state.installedLoading && !state.installed.length) {
@@ -1785,6 +1826,13 @@ function renderInstalled() {
     body = stateHtml({
       title: "Yüklü uygulamalar alınamadı",
       text: state.installedError,
+      retry: "installed",
+      icon: ICON.warning,
+    });
+  } else if (!visible.length && providerErrors.length) {
+    body = stateHtml({
+      title: "Paket kaynağı yanıt vermedi",
+      text: providerErrors.map(issue => `${providerName(issue.provider)}: ${issue.message}`).join(" · "),
       retry: "installed",
       icon: ICON.warning,
     });
@@ -1807,8 +1855,20 @@ function renderInstalled() {
         : '<button class="btn btn-ghost" type="button" data-nav="discover">Keşfet’e göz at</button>',
     });
   } else {
-    body = `<div class="app-list">${visible.map(app => appRowHtml(app, "installed")).join("")}</div>`;
+    const visibleApps = visible.slice(0, state.installedVisibleCount);
+    const remaining = visible.length - visibleApps.length;
+    const more = remaining > 0
+      ? `<div class="load-more"><button class="btn btn-ghost" type="button" data-installed-more>Daha fazla göster (${remaining})</button></div>`
+      : "";
+    body = `<div class="app-list">${visibleApps.map(app => appRowHtml(app, "installed")).join("")}</div>${more}`;
   }
+
+  const providerNotice = providerErrors.length && visible.length
+    ? `<div class="notice" role="status" aria-live="polite">
+        ${ICON.warning}
+        <span><strong>Bazı paket kaynakları yenilenemedi.</strong> ${escapeHtml(providerErrors.map(issue => `${providerName(issue.provider)}: ${issue.message}`).join(" · "))} Yenile ile tekrar deneyin.</span>
+      </div>`
+    : "";
 
   els.installedView.innerHTML = `
     <header class="view-head">
@@ -1825,6 +1885,7 @@ function renderInstalled() {
       </div>` : ""}
     </header>
     ${storeNoticeHtml()}
+    ${providerNotice}
     ${body}`;
 }
 
@@ -1837,6 +1898,8 @@ function infoCardHtml(detail) {
   const rows = [];
   rows.push(["Paket sağlayıcısı", providerLabel(app)]);
   if (app.version) rows.push(["Sürüm", app.version]);
+  if (app.channel) rows.push(["Snap kanalı", app.channel]);
+  if (app.pinned) rows.push(["Durum", "Sabitlenmiş"]);
   if (app.category) rows.push(["Kategori", categoryName(app.category)]);
   if (detail.license) rows.push(["Lisans", detail.license]);
   if (detail.downloadSize) rows.push(["İndirme boyutu", formatBytes(detail.downloadSize)]);
@@ -2556,6 +2619,7 @@ function bindEvents() {
         renderSearch();
       } else if (scope === "installed") {
         state.installedProvider = provider;
+        state.installedVisibleCount = INSTALLED_PAGE_SIZE;
         renderInstalled();
       }
       return;
@@ -2652,10 +2716,17 @@ function bindEvents() {
       loadCategory(state.route.slug, (state.category?.page || 1) + 1);
       return;
     }
+    const installedMore = target.closest("[data-installed-more]");
+    if (installedMore) {
+      state.installedVisibleCount += INSTALLED_PAGE_SIZE;
+      renderInstalled();
+      return;
+    }
 
     const filter = target.closest("[data-updates-filter]");
     if (filter) {
       state.updatesOnly = !state.updatesOnly;
+      state.installedVisibleCount = INSTALLED_PAGE_SIZE;
       renderInstalled();
       return;
     }
@@ -3351,7 +3422,7 @@ async function mockInvoke(command, args = {}) {
   }
 
   if (command === "search_apps") {
-    return mockSearch(args.query);
+    return { apps: mockSearch(args.query), providerErrors: [] };
   }
 
   if (command === "get_category") {
@@ -3364,8 +3435,14 @@ async function mockInvoke(command, args = {}) {
 
   if (command === "list_installed_apps") {
     await sleep(180);
-    if (!MOCK.setup.flatpak) return [];
-    return mockInstalledApps();
+    return {
+      apps: MOCK.setup.flatpak ? mockInstalledApps() : [],
+      providerErrors: [],
+    };
+  }
+
+  if (command === "refresh_provider_caches") {
+    return;
   }
 
   if (command === "list_flatpak_remotes") {
