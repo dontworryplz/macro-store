@@ -1,0 +1,5 @@
+src-tauri/target/
+src-tauri/gen/
+ui/node_modules/
+*.AppImage
+.DS_Store

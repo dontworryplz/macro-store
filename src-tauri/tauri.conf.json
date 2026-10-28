@@ -1,0 +1,70 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Macro Store",
+  "mainBinaryName": "macro-store",
+  "version": "0.3.0",
+  "identifier": "org.macro.store",
+  "build": {
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Macro Store",
+        "width": 1240,
+        "height": 820,
+        "minWidth": 960,
+        "minHeight": 640,
+        "center": true,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": true,
+        "transparent": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' data: https://dl.flathub.org; style-src 'self' 'unsafe-inline'; font-src 'self'; script-src 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "deb",
+      "rpm"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png"
+    ],
+    "publisher": "Macro Store",
+    "homepage": "https://flathub.org",
+    "license": "MIT",
+    "licenseFile": "../LICENSE",
+    "copyright": "Copyright © 2026 Macro Store contributors",
+    "category": "Utility",
+    "shortDescription": "Flathub tabanlı sade Linux yazılım mağazası.",
+    "longDescription": "Macro Store, Flathub kataloğunu sade ve monokrom bir arayüzle sunar. Uygulamaları arayın, ayrıntılarını, ekran görüntülerini ve topluluk yorumlarını inceleyin; tek tıkla kurun, kaldırın veya güncelleyin.",
+    "linux": {
+      "deb": {
+        "section": "utils",
+        "priority": "optional",
+        "files": {
+          "/usr/share/doc/macro-store/copyright": "../LICENSE"
+        }
+      },
+      "rpm": {
+        "release": "1",
+        "files": {
+          "/usr/share/licenses/macro-store/LICENSE": "../LICENSE"
+        }
+      },
+      "appimage": {
+        "bundleMediaFramework": false
+      }
+    }
+  }
+}

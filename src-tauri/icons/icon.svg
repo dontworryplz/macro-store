@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#16252e"/>
+      <stop offset="0.55" stop-color="#0c151c"/>
+      <stop offset="1" stop-color="#070c10"/>
+    </linearGradient>
+    <linearGradient id="bag" x1="0.2" y1="0" x2="0.8" y2="1">
+      <stop offset="0" stop-color="#76f4c5"/>
+      <stop offset="0.5" stop-color="#45dda3"/>
+      <stop offset="1" stop-color="#1ec58b"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#45dda3" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#45dda3" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="224" fill="url(#bg)"/>
+  <circle cx="512" cy="476" r="370" fill="url(#glow)"/>
+  <path d="M232 365h560l-32 398c-4 53-48 93-101 93H365c-53 0-97-40-101-93L232 365Z" fill="url(#bag)"/>
+  <path d="M361 400V318c0-83 68-151 151-151s151 68 151 151v82" fill="none" stroke="#8bf7cc" stroke-width="58" stroke-linecap="round"/>
+  <path d="M512 463v162m0 0-83-83m83 83 83-83" fill="none" stroke="#08241a" stroke-width="54" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="86" y="86" width="852" height="852" rx="164" fill="none" stroke="#ffffff" stroke-opacity="0.055" stroke-width="4"/>
+</svg>
