@@ -455,6 +455,9 @@ const state = {
   recents: [],
   activityHistory: [],
   libraryUsage: null,
+  brewTaps: [],
+  brewTapsLoading: false,
+  brewTapsError: "",
   cliApp: null,
   cliCommands: [],
   category: null,
@@ -2885,6 +2888,37 @@ function renderDetail() {
     <p class="detail-footnote">${providerNote}</p>`;
 }
 
+async function loadBrewTaps(force = false) {
+  if (!state.storeInfo?.brewAvailable) {
+    state.brewTaps = [];
+    return;
+  }
+  if (!force && (state.brewTapsLoading || state.brewTaps.length)) return;
+  state.brewTapsLoading = true;
+  state.brewTapsError = "";
+  renderIf("settings", renderSettings);
+  try {
+    const taps = await invoke("list_brew_taps");
+    state.brewTaps = Array.isArray(taps) ? taps : [];
+  } catch (err) {
+    state.brewTapsError = errText(err);
+  } finally {
+    state.brewTapsLoading = false;
+    renderIf("settings", renderSettings);
+  }
+}
+
+async function runBrewTap(action, name) {
+  const command = action === "add" ? "add_brew_tap" : "remove_brew_tap";
+  try {
+    const message = await invoke(command, { name });
+    toast(message || "Tap güncellendi.", "success");
+    await loadBrewTaps(true);
+  } catch (err) {
+    toast(errText(err), "error");
+  }
+}
+
 const SNAP_CHANNELS = ["latest/stable", "latest/candidate", "latest/beta", "latest/edge"];
 
 function snapChannelHtml(app) {
@@ -2953,6 +2987,37 @@ function renderSettings() {
   const flatpakStatusClass = typeof flatpakAvailable !== "boolean" ? "is-pending" : flatpakReady ? "is-ok" : "is-error";
   const flathubStatusClass = typeof flathubAvailable !== "boolean" ? "is-pending" : flathubReady ? "is-ok" : "is-error";
   const pruneBusy = state.busy?.action === "prune";
+  const brewReady = Boolean(state.storeInfo?.brewAvailable);
+  let brewBody = "";
+  if (brewReady) {
+    if (state.brewTapsLoading && !state.brewTaps.length) {
+      brewBody = skeletonRows(2);
+    } else if (state.brewTapsError) {
+      brewBody = stateHtml({
+        title: "Tap listesi alınamadı",
+        text: state.brewTapsError,
+        retry: "brew-taps",
+        icon: ICON.warning,
+      });
+    } else if (!state.brewTaps.length) {
+      brewBody = '<div class="repo-empty">Tanımlı Homebrew tap\'i bulunamadı.</div>';
+    } else {
+      brewBody = `<div class="repo-list">${state.brewTaps.map(name => `
+        <div class="repo-row">
+          <span class="repo-mark" aria-hidden="true">${ICON.repo}</span>
+          <div class="repo-body">
+            <div class="repo-title"><strong>${escapeHtml(name)}</strong></div>
+            <p class="repo-url">Homebrew tap</p>
+          </div>
+          <button class="repo-remove" type="button" data-remove-tap="${attr(name)}" title="Tap'i kaldır" aria-label="${attr(name)} tap'ini kaldır">${ICON.trash}</button>
+        </div>`).join("")}</div>`;
+    }
+    brewBody += `
+      <form class="tap-form" data-tap-form>
+        <input type="text" name="tap" placeholder="kullanici/tap" aria-label="Eklenecek Homebrew tap adı" autocomplete="off" spellcheck="false" pattern="[A-Za-z0-9@+_.-]+/[A-Za-z0-9@+_.-]+(/[A-Za-z0-9@+_.-]+)?" required />
+        <button class="btn btn-ghost btn-sm" type="submit">Tap ekle</button>
+      </form>`;
+  }
   const activityBody = state.activityHistory.length
     ? `<ul class="activity-list">
         ${state.activityHistory.map(entry => `
@@ -3040,6 +3105,14 @@ function renderSettings() {
       </div>
       ${activityBody}
     </section>
+
+    ${brewReady ? `<section class="settings-section">
+      <div class="settings-head">
+        <h2>Homebrew tap'leri</h2>
+        <p>Ek depoları yönetin. Tap eklemek ya da kaldırmak Homebrew aramalarını etkiler.</p>
+      </div>
+      ${brewBody}
+    </section>` : ""}
 
     <section class="settings-section">
       <div class="settings-head">
@@ -3568,6 +3641,17 @@ function bindEvents() {
 
   els.searchClear.addEventListener("click", () => resetSearch({ goDiscover: true, focus: true }));
 
+  document.addEventListener("submit", event => {
+    const form = event.target instanceof Element ? event.target.closest("[data-tap-form]") : null;
+    if (!form) return;
+    event.preventDefault();
+    const field = form.querySelector("input[name=\"tap\"]");
+    const name = String(field?.value || "").trim();
+    if (!name) return;
+    form.reset();
+    runBrewTap("add", name);
+  });
+
   document.addEventListener("input", event => {
     const input = event.target instanceof Element ? event.target.closest("[data-installed-search]") : null;
     if (!input || state.route.name !== "installed") return;
@@ -3826,6 +3910,18 @@ function bindEvents() {
       return;
     }
 
+    const removeTap = target.closest("[data-remove-tap]");
+    if (removeTap) {
+      const name = removeTap.dataset.removeTap;
+      askConfirm({
+        title: "Tap'i kaldır",
+        text: `${name} tap'i Homebrew yapılandırmasından çıkarılacak.`,
+        label: "Kaldır",
+        onConfirm: () => runBrewTap("remove", name),
+      });
+      return;
+    }
+
     const channelButton = target.closest("[data-snap-channel]");
     if (channelButton) {
       const channel = channelButton.dataset.snapChannel;
@@ -3876,7 +3972,10 @@ function bindEvents() {
       navigate({ name: page }, { root: true });
       if (page === "installed") loadInstalled();
       if (page === "discover") loadDiscover();
-      if (page === "settings") loadRemotes();
+      if (page === "settings") {
+        loadRemotes();
+        loadBrewTaps();
+      }
       if (page === "categories") updatePageTitle();
       return;
     }
@@ -3939,6 +4038,7 @@ function bindEvents() {
       else if (kind === "category") loadCategory(state.route.slug, 1, true);
       else if (kind === "detail") loadDetail(state.route.id, appProvider(state.route), true);
       else if (kind === "remotes") loadRemotes(true);
+      else if (kind === "brew-taps") loadBrewTaps(true);
       return;
     }
 
@@ -4823,6 +4923,18 @@ async function mockInvoke(command, args = {}) {
       totalBytes: apps.length * 120 * 1024 * 1024,
       apps: apps.length,
     };
+  }
+
+  if (command === "list_brew_taps") {
+    await sleep(150);
+    return ["homebrew/cask-fonts", "homebrew/cask-versions"];
+  }
+
+  if (command === "add_brew_tap" || command === "remove_brew_tap") {
+    await sleep(300);
+    return command === "add_brew_tap"
+      ? `${args.name} tap'i eklendi.`
+      : `${args.name} tap'i kaldırıldı.`;
   }
 
   if (command === "switch_snap_channel") {

@@ -1264,7 +1264,7 @@ fn cache_write<T>(
     if guard.len() >= limit {
         if let Some(oldest) = guard
             .iter()
-            .min_by_key(|(_, (checked_at, _))| checked_at.elapsed())
+            .min_by_key(|(_, (checked_at, _))| *checked_at)
             .map(|(key, _)| key.clone())
         {
             guard.remove(&oldest);
@@ -1312,13 +1312,7 @@ async fn get_cached_json<T: DeserializeOwned>(url: &str) -> Result<T, String> {
 
     let value = get_json::<Value>(url).await?;
 
-    cache_write(
-        cache,
-        url,
-        value.clone(),
-        JSON_CACHE_TTL,
-        JSON_CACHE_LIMIT,
-    );
+    cache_write(cache, url, value.clone(), JSON_CACHE_TTL, JSON_CACHE_LIMIT);
 
     serde_json::from_value(value).map_err(|err| format!("Flathub verisi çözümlenemedi: {err}"))
 }
@@ -2412,6 +2406,27 @@ async fn prune_unused_runtimes(app: AppHandle) -> Result<OperationOutcome, Strin
 }
 
 #[tauri::command]
+async fn list_brew_taps() -> Result<Vec<String>, String> {
+    tokio::task::spawn_blocking(brew::taps)
+        .await
+        .map_err(|error| format!("Homebrew tap listesi arka planda okunamadı: {error}"))?
+}
+
+#[tauri::command]
+async fn add_brew_tap(name: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || brew::add_tap(&name))
+        .await
+        .map_err(|error| format!("Homebrew tap işlemi arka planda tamamlanamadı: {error}"))?
+}
+
+#[tauri::command]
+async fn remove_brew_tap(name: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || brew::remove_tap(&name))
+        .await
+        .map_err(|error| format!("Homebrew tap işlemi arka planda tamamlanamadı: {error}"))?
+}
+
+#[tauri::command]
 async fn switch_snap_channel(
     app: AppHandle,
     id: String,
@@ -2976,6 +2991,9 @@ pub fn run() {
             library_usage,
             prune_unused_runtimes,
             switch_snap_channel,
+            list_brew_taps,
+            add_brew_tap,
+            remove_brew_tap,
             refresh_provider_caches,
             list_flatpak_remotes,
             add_flatpak_remote,
@@ -3021,6 +3039,58 @@ mod tests {
         );
         invalidate_icon_cache();
         assert!(icons.lock().expect("icon cache lock").is_empty());
+    }
+
+    #[test]
+    fn cache_read_respects_ttl() {
+        let cache: Mutex<HashMap<String, (Instant, u32)>> = Mutex::new(HashMap::new());
+        let ttl = Duration::from_secs(60);
+
+        cache_write(&cache, "fresh", 7, ttl, 4);
+        assert_eq!(cache_read(&cache, "fresh", ttl), Some(7));
+
+        let stale = Instant::now()
+            .checked_sub(Duration::from_secs(120))
+            .expect("stale instant");
+        cache
+            .lock()
+            .expect("cache lock")
+            .insert("stale".to_string(), (stale, 9));
+
+        assert_eq!(cache_read(&cache, "stale", ttl), None);
+        assert_eq!(cache_read(&cache, "missing", ttl), None);
+    }
+
+    #[test]
+    fn cache_write_prunes_expired_and_evicts_oldest() {
+        let cache: Mutex<HashMap<String, (Instant, u32)>> = Mutex::new(HashMap::new());
+        let ttl = Duration::from_secs(60);
+        let limit = 2;
+        let expired = Instant::now()
+            .checked_sub(Duration::from_secs(120))
+            .expect("expired instant");
+        let older = Instant::now()
+            .checked_sub(Duration::from_secs(10))
+            .expect("older instant");
+        let newer = Instant::now()
+            .checked_sub(Duration::from_secs(5))
+            .expect("newer instant");
+
+        {
+            let mut guard = cache.lock().expect("cache lock");
+            guard.insert("expired".to_string(), (expired, 0));
+            guard.insert("older".to_string(), (older, 1));
+            guard.insert("newer".to_string(), (newer, 2));
+        }
+
+        cache_write(&cache, "fresh", 3, ttl, limit);
+
+        let guard = cache.lock().expect("cache lock");
+        assert_eq!(guard.len(), limit);
+        assert!(!guard.contains_key("expired"));
+        assert!(!guard.contains_key("older"));
+        assert!(guard.contains_key("newer"));
+        assert!(guard.contains_key("fresh"));
     }
 
     #[test]

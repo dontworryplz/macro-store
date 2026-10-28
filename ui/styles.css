@@ -1631,6 +1631,28 @@ html[data-theme="light"] .cat-icon circle { fill: rgba(139, 106, 53, 0.08); }
   line-height: 1.5;
 }
 
+.tap-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.tap-form input {
+  flex: 1 1 200px;
+  min-width: 0;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.tap-form input:focus-visible { border-color: var(--line-strong); }
+
 .channel-row {
   display: flex;
   flex-wrap: wrap;

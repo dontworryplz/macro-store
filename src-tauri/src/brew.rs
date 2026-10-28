@@ -945,6 +945,69 @@ fn action_sync(kind: PackageKind, token: &str, action: &str) -> Result<String, S
     Ok(format!("{token} {result}."))
 }
 
+fn valid_tap_name(name: &str) -> bool {
+    let parts: Vec<&str> = name.split('/').collect();
+    if parts.len() < 2 || parts.len() > 3 {
+        return false;
+    }
+    parts.iter().all(|part| {
+        !part.is_empty()
+            && part.len() <= 64
+            && !part.starts_with('-')
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"@+_.-".contains(&byte))
+    })
+}
+
+fn tap_sync(args: &[&str], label: &str) -> Result<String, String> {
+    if running_as_root()? {
+        return Err("Homebrew işlemleri root olarak çalıştırılamaz.".to_string());
+    }
+    if !available() {
+        return Err(
+            "Homebrew komutu bulunamadı; PATH'i ve Linuxbrew öneklerini kontrol edin.".to_string(),
+        );
+    }
+    let args: Vec<String> = args.iter().map(|value| value.to_string()).collect();
+    let output = run_brew(&args, ACTION_TIMEOUT, ACTION_OUTPUT_LIMIT)?;
+    if !output.success {
+        return Err(command_failure(label, &output));
+    }
+    Ok(output.stdout)
+}
+
+pub fn taps() -> Result<Vec<String>, String> {
+    let stdout = tap_sync(&["tap"], "brew tap")?;
+    let mut names: Vec<String> = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| valid_tap_name(line))
+        .map(str::to_string)
+        .collect();
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
+pub fn add_tap(name: &str) -> Result<String, String> {
+    if !valid_tap_name(name) {
+        return Err("Homebrew tap adı geçersiz.".to_string());
+    }
+    tap_sync(&["tap", name], "brew tap")?;
+    invalidate_cache();
+    Ok(format!("{name} tap'i eklendi."))
+}
+
+pub fn remove_tap(name: &str) -> Result<String, String> {
+    if !valid_tap_name(name) {
+        return Err("Homebrew tap adı geçersiz.".to_string());
+    }
+    tap_sync(&["untap", name], "brew untap")?;
+    invalidate_cache();
+    Ok(format!("{name} tap'i kaldırıldı."))
+}
+
 pub async fn search(query: &str) -> Result<Vec<ProviderApp>, String> {
     let query = query.trim();
     if query.is_empty() {
