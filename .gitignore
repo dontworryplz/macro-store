@@ -3,3 +3,7 @@ src-tauri/gen/
 ui/node_modules/
 *.AppImage
 .DS_Store
+packaging/arch/src/
+packaging/arch/pkg/
+packaging/arch/*.tar.gz
+packaging/arch/*.pkg.tar.zst

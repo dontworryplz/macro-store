@@ -1,4 +1,4 @@
-/* Macro Store — Linux uygulama mağazası arayüzü.
+/* Macro Store — Flatpak, Snap, Homebrew ve AppImage kaynaklarını yöneten mağaza arayüzü.
    Framework ya da derleme adımı yok; düşük bellek kullanımı için saf JavaScript. */
 
 const TAURI = window.__TAURI__;
@@ -7,6 +7,17 @@ const invoke = IS_TAURI ? TAURI.core.invoke : mockInvoke;
 const listen = IS_TAURI ? TAURI.event.listen : mockListen;
 
 const SETUP_SEEN_KEY = "macro-setup-seen";
+const SEARCH_HISTORY_KEY = "macro-search-history";
+const SEARCH_HISTORY_LIMIT = 5;
+const LAST_REFRESH_KEY = "macro-last-refresh";
+const FAVORITES_KEY = "macro-favorites";
+const RECENTS_KEY = "macro-recents";
+const RECENTS_LIMIT = 5;
+const UPDATE_WATCH_INTERVAL = 30 * 60 * 1000;
+const ACTIVITY_KEY = "macro-activity";
+const ACTIVITY_LIMIT = 25;
+const LIBRARY_PREFS_KEY = "macro-library-prefs";
+const APP_VERSION = "0.5.0";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -15,13 +26,53 @@ const ACTIONS = {
   install: { busy: "Kuruluyor…", verb: "kuruluyor", done: "Kurulum tamamlandı." },
   update: { busy: "Güncelleniyor…", verb: "güncelleniyor", done: "Güncelleme tamamlandı." },
   remove: { busy: "Kaldırılıyor…", verb: "kaldırılıyor", done: "Kaldırma tamamlandı." },
+  launch: { busy: "Açılıyor…", verb: "açılıyor", done: "Uygulama açıldı." },
 };
-const PROVIDER_NAMES = { flatpak: "Flatpak", snap: "Snap", brew: "Homebrew" };
+const t = (key, vars) => (window.MacroI18n ? window.MacroI18n.t(key, vars) : key);
+
+const ACTION_LABELS = {
+  install: "Kurulum",
+  update: "Güncelleme",
+  remove: "Kaldırma",
+  launch: "Açma",
+  prune: "Bakım",
+  channel: "Kanal",
+  mask: "Güncelleme durdurma",
+  unmask: "Güncelleme sürdürme",
+  rollback: "Sürüm geri alma",
+};
+
+const ACTION_LABEL_KEYS = {
+  install: "action.install",
+  update: "action.update",
+  remove: "action.remove",
+  launch: "action.open",
+  prune: "action.prune",
+  channel: "action.channel",
+  mask: "action.mask",
+  unmask: "action.unmask",
+  rollback: "action.rollback",
+};
+
+function actionLabel(action) {
+  const key = ACTION_LABEL_KEYS[action];
+  return key ? t(key) : ACTION_LABELS[action] || "";
+}
+const PROVIDER_NAMES = { flatpak: "Flatpak", snap: "Snap", brew: "Homebrew", appimage: "AppImage" };
 const PROVIDER_FILTERS = [
   { value: "all", label: "Tümü" },
   { value: "flatpak", label: "Flatpak" },
   { value: "snap", label: "Snap" },
   { value: "brew", label: "Homebrew" },
+  { value: "appimage", label: "AppImage" },
+];
+const ACCENTS = [
+  { id: "default", labelKey: "settings.accent.default" },
+  { id: "red", labelKey: "settings.accent.red" },
+  { id: "blue", labelKey: "settings.accent.blue" },
+  { id: "green", labelKey: "settings.accent.green" },
+  { id: "yellow", labelKey: "settings.accent.yellow" },
+  { id: "purple", labelKey: "settings.accent.purple" },
 ];
 const INSTALLED_PAGE_SIZE = 40;
 const INSTALLED_SORTS = [
@@ -46,6 +97,8 @@ const ICON = {
   trash: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4.5 7h15M9.5 7V5.2c0-.7.5-1.2 1.2-1.2h2.6c.7 0 1.2.5 1.2 1.2V7M6.8 7l.8 12h8.8l.8-12M10 10.5v5M14 10.5v5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
   repo: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><ellipse cx="12" cy="6" rx="7" ry="3" stroke="currentColor" stroke-width="1.6"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6" stroke="currentColor" stroke-width="1.6"/></svg>`,
   copy: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="8.5" y="8.5" width="11" height="11" rx="2" stroke="currentColor" stroke-width="1.6"/><path d="M15.5 8.5v-2a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2" stroke="currentColor" stroke-width="1.6"/></svg>`,
+  star: `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m12 4.2 2.4 4.9 5.4.8-3.9 3.8.9 5.4-4.8-2.5-4.8 2.5.9-5.4L4.2 9.9l5.4-.8L12 4.2Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>`,
+  starFilled: `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="m12 4.2 2.4 4.9 5.4.8-3.9 3.8.9 5.4-4.8-2.5-4.8 2.5.9-5.4L4.2 9.9l5.4-.8L12 4.2Z"/></svg>`,
 };
 
 const CATEGORY_LIST = [
@@ -146,11 +199,12 @@ function providerManagerLabel(app) {
   const provider = appProvider(app);
   if (provider === "flatpak") return "Flatpak · kullanıcı kapsamı";
   if (provider === "snap") return "Snap · sistem kapsamı";
+  if (provider === "appimage") return "AppImage · yerel dosya";
   return providerLabel(app);
 }
 
 function providerActionLabel(action, app) {
-  const verbs = { install: "kur", update: "güncelle", remove: "kaldır" };
+  const verbs = { install: "kur", update: "güncelle", remove: "kaldır", launch: "aç" };
   const provider = appProvider(app);
   const scope = provider === "flatpak" ? " (kullanıcı kapsamı)" : provider === "snap" ? " (sistem kapsamı)" : "";
   return `${providerName(provider)} ile ${verbs[action] || "işlem yap"}${scope}`;
@@ -160,6 +214,7 @@ function providerInstallInfo(app) {
   const provider = appProvider(app);
   if (provider === "flatpak") return "Flatpak kullanıcı kapsamında kurulur";
   if (provider === "snap") return "Snap sistem kapsamında kurulur; yetkilendirme istenebilir";
+  if (provider === "appimage") return "Yerel AppImage dosyası; mağaza veri dizininde saklanır";
   return "Homebrew paket yöneticisiyle yönetilir";
 }
 
@@ -174,15 +229,214 @@ function cliCommand(app) {
     const token = id.replace(/^(formula|cask)\//, "");
     return isCask ? `brew install --cask ${token}` : `brew install ${token}`;
   }
+  if (provider === "appimage") return `$HOME/.local/share/macro-store/appimages/${id}.AppImage`;
   return "";
+}
+
+function cliCommandsFor(app) {
+  const id = String(app?.id || "").trim();
+  if (!id) return [];
+  const provider = appProvider(app);
+  if (provider === "flatpak") {
+    return [
+      { label: "Kur", command: `flatpak install --user flathub ${id}` },
+      { label: "Güncelle", command: `flatpak update --user ${id}` },
+      { label: "Kaldır", command: `flatpak uninstall --user ${id}` },
+      { label: "Bilgi", command: `flatpak info ${id}` },
+    ];
+  }
+  if (provider === "snap") {
+    return [
+      { label: "Kur", command: `sudo snap install ${id}` },
+      { label: "Güncelle", command: `sudo snap refresh ${id}` },
+      { label: "Kaldır", command: `sudo snap remove ${id}` },
+      { label: "Bilgi", command: `snap info ${id}` },
+    ];
+  }
+  if (provider === "brew") {
+    const isCask = app.package_type === "cask" || id.startsWith("cask/");
+    const token = id.replace(/^(formula|cask)\//, "");
+    const flag = isCask ? " --cask" : "";
+    return [
+      { label: "Kur", command: `brew install${flag} ${token}` },
+      { label: "Güncelle", command: `brew upgrade${flag} ${token}` },
+      { label: "Kaldır", command: `brew uninstall${flag} ${token}` },
+      { label: "Bilgi", command: `brew info${flag} ${token}` },
+    ];
+  }
+  if (provider === "appimage") {
+    const path = `$HOME/.local/share/macro-store/appimages/${id}.AppImage`;
+    return [
+      { label: "Aç", command: path },
+      { label: "Kaldır", command: `rm "${path}"` },
+      { label: "Bilgi", command: `ls -l "${path}"` },
+    ];
+  }
+  return [];
+}
+
+function openCliModal(app) {
+  const commands = cliCommandsFor(app);
+  if (!commands.length) {
+    toast("Bu sağlayıcı için CLI komutu yok.", "error");
+    return;
+  }
+  state.cliApp = app;
+  state.cliCommands = commands;
+  els.cliSubtitle.textContent = `${app.name || app.id} · ${providerLabel(app)}`;
+  els.cliBody.innerHTML = commands.map(item => `
+    <div class="cli-command">
+      <span class="cli-label">${escapeHtml(item.label)}</span>
+      <code>${escapeHtml(item.command)}</code>
+      <button class="icon-btn" type="button" data-copy-command="${attr(item.command)}" aria-label="${attr(item.label)} komutunu kopyala">
+        ${ICON.copy}
+      </button>
+    </div>`).join("");
+  openModal(els.cliModal);
 }
 
 function sameApp(app, provider, id) {
   return Boolean(app && app.id === id && appProvider(app) === provider);
 }
 
+function findKnownApp(provider, id) {
+  if (!id) return null;
+  const pools = [
+    state.detail?.app,
+    ...state.installed,
+    ...state.searchResults,
+    ...(state.discover?.picks || []),
+    ...(state.discover?.popular || []),
+    state.discover?.appOfDay,
+    ...(state.category?.apps || []),
+    ...state.favorites,
+    ...state.recents,
+  ];
+  return pools.find(app => sameApp(app, provider, id)) || null;
+}
+
+function appSnapshot(app) {
+  return {
+    id: app.id,
+    provider: appProvider(app),
+    packageType: app.packageType || null,
+    name: app.name || app.id,
+    summary: app.summary || "",
+    developer: app.developer || "",
+    icon: app.icon || null,
+    category: app.category || null,
+    version: app.version || "",
+    channel: app.channel || null,
+    pinned: Boolean(app.pinned),
+    installed: Boolean(app.installed),
+    updateAvailable: Boolean(app.updateAvailable),
+    monthlyInstalls: app.monthlyInstalls ?? null,
+  };
+}
+
+function readStoredApps(key) {
+  try {
+    const raw = JSON.parse(localStorage.getItem(key) || "[]");
+    if (!Array.isArray(raw)) return [];
+    return raw.filter(item =>
+      item && typeof item.id === "string" && item.id.trim() && PROVIDER_NAMES[item.provider],
+    );
+  } catch {
+    return [];
+  }
+}
+
+function saveStoredApps(key, list) {
+  try {
+    localStorage.setItem(key, JSON.stringify(list));
+  } catch {
+    /* Depolama kapalıysa liste yalnızca oturum boyunca tutulur. */
+  }
+}
+
+function storedAppForView(app) {
+  const live = findKnownApp(appProvider(app), app.id);
+  return live ? { ...app, ...appSnapshot(live) } : app;
+}
+
+function isFavorite(app) {
+  return state.favorites.some(item => sameApp(item, appProvider(app), app.id));
+}
+
+function toggleFavorite(app) {
+  const provider = appProvider(app);
+  const active = isFavorite(app);
+  if (active) {
+    state.favorites = state.favorites.filter(item => !sameApp(item, provider, app.id));
+  } else {
+    state.favorites = [appSnapshot(app), ...state.favorites];
+  }
+  saveStoredApps(FAVORITES_KEY, state.favorites);
+  toast(active ? "Favorilerden çıkarıldı." : "Favorilere eklendi.", "success");
+  renderChrome();
+  if (state.route.name === "favorites") renderFavorites();
+  else if (["search", "installed", "category"].includes(state.route.name)) renderRoute();
+  else if (state.route.name === "detail") renderDetail();
+  else renderIf("discover", renderDiscover);
+  return !active;
+}
+
+function rememberRecent(app) {
+  if (!app?.id) return;
+  const snapshot = appSnapshot(app);
+  state.recents = [
+    snapshot,
+    ...state.recents.filter(item => !sameApp(item, snapshot.provider, snapshot.id)),
+  ].slice(0, RECENTS_LIMIT);
+  saveStoredApps(RECENTS_KEY, state.recents);
+}
+
+function syncStoredApp(app) {
+  const provider = appProvider(app);
+  let changed = false;
+  for (const list of [state.favorites, state.recents]) {
+    const item = list.find(entry => sameApp(entry, provider, app.id));
+    if (!item) continue;
+    item.installed = Boolean(app.installed);
+    item.updateAvailable = Boolean(app.updateAvailable);
+    if (app.version) item.version = app.version;
+    changed = true;
+  }
+  if (changed) {
+    saveStoredApps(FAVORITES_KEY, state.favorites);
+    saveStoredApps(RECENTS_KEY, state.recents);
+  }
+}
+
+function syncStoredFromInstalled() {
+  const byKey = new Map(state.installed.map(app => [selectionKey(appProvider(app), app.id), app]));
+  let changed = false;
+  for (const list of [state.favorites, state.recents]) {
+    for (const item of list) {
+      const live = byKey.get(selectionKey(appProvider(item), item.id));
+      const installed = Boolean(live);
+      if (item.installed !== installed) {
+        item.installed = installed;
+        changed = true;
+      }
+      if (live && item.version !== live.version) {
+        item.version = live.version || "";
+        changed = true;
+      }
+      if (item.updateAvailable !== Boolean(live?.updateAvailable)) {
+        item.updateAvailable = Boolean(live?.updateAvailable);
+        changed = true;
+      }
+    }
+  }
+  if (changed) {
+    saveStoredApps(FAVORITES_KEY, state.favorites);
+    saveStoredApps(RECENTS_KEY, state.recents);
+  }
+}
+
 function providerCounts(apps) {
-  const counts = { all: 0, flatpak: 0, snap: 0, brew: 0 };
+  const counts = { all: 0, flatpak: 0, snap: 0, brew: 0, appimage: 0 };
   if (!Array.isArray(apps)) return null;
   for (const app of apps) {
     counts.all += 1;
@@ -224,17 +478,21 @@ const state = {
   activeNav: "discover",
   query: "",
   searchResults: [],
+  searchHistory: [],
   searching: false,
   searchError: "",
   searchProviderErrors: [],
   searchSeq: 0,
   searchProvider: "all",
+  searchVerifiedOnly: false,
+  searchFreeOnly: false,
   discover: null,
   discoverLoading: false,
   discoverError: "",
   discoverSeq: 0,
   installed: [],
   installedLoaded: false,
+  installedFromCache: false,
   installedLoading: false,
   installedError: "",
   installedProviderErrors: [],
@@ -243,6 +501,19 @@ const state = {
   updatesOnly: false,
   installedProvider: "all",
   installedSort: "name",
+  installedQuery: "",
+  selectionMode: false,
+  selection: new Set(),
+  lastRefreshed: null,
+  favorites: [],
+  recents: [],
+  activityHistory: [],
+  libraryUsage: null,
+  brewTaps: [],
+  brewTapsLoading: false,
+  brewTapsError: "",
+  cliApp: null,
+  cliCommands: [],
   category: null,
   categoryLoading: false,
   categoryError: "",
@@ -251,6 +522,14 @@ const state = {
   detailLoading: false,
   detailError: "",
   detailSeq: 0,
+  permissions: null,
+  permissionsLoading: false,
+  permissionsError: "",
+  permissionsSeq: 0,
+  commits: [],
+  commitsLoading: false,
+  commitsError: "",
+  commitsSeq: 0,
   remotes: [],
   remotesLoading: false,
   remotesError: "",
@@ -270,22 +549,28 @@ const state = {
   logs: [],
   pendingConfirm: null,
   gallery: null,
+  appimage: { picking: false, importing: false },
 };
 
 const els = {
   main: $("#main"),
   searchInput: $("#searchInput"),
   searchClear: $("#searchClear"),
+  searchHistory: $("#searchHistory"),
   backButton: $("#backButton"),
   refreshButton: $("#refreshButton"),
   logButton: $("#logButton"),
+  shortcutsButton: $("#shortcutsButton"),
   installedCount: $("#installedCount"),
+  updatesCount: $("#updatesCount"),
+  favoritesCount: $("#favoritesCount"),
   statusDot: $("#statusDot"),
   statusText: $("#statusText"),
   discoverView: $("#discoverView"),
   searchView: $("#searchView"),
   categoriesView: $("#categoriesView"),
   categoryView: $("#categoryView"),
+  favoritesView: $("#favoritesView"),
   installedView: $("#installedView"),
   detailView: $("#detailView"),
   settingsView: $("#settingsView"),
@@ -299,6 +584,11 @@ const els = {
   setupSubtitle: $("#setupSubtitle"),
   setupBody: $("#setupBody"),
   setupClose: $("#setupClose"),
+  shortcutsModal: $("#shortcutsModal"),
+  cliModal: $("#cliModal"),
+  cliSubtitle: $("#cliSubtitle"),
+  cliBody: $("#cliBody"),
+  cliCopyAll: $("#cliCopyAll"),
   logModal: $("#logModal"),
   logOutput: $("#logOutput"),
   logClear: $("#logClear"),
@@ -307,12 +597,20 @@ const els = {
   confirmTitle: $("#confirmTitle"),
   confirmText: $("#confirmText"),
   confirmAccept: $("#confirmAccept"),
+  appimageModal: $("#appimageModal"),
+  appimagePath: $("#appimagePath"),
+  appimageName: $("#appimageName"),
+  appimageError: $("#appimageError"),
+  appimagePick: $("#appimagePick"),
+  appimageImport: $("#appimageImport"),
   lightbox: $("#lightbox"),
   lightboxImage: $("#lightboxImage"),
   lightboxCaption: $("#lightboxCaption"),
 };
 
 let searchTimer = null;
+let installedSearchTimer = null;
+let updateTimer = null;
 let activityTimer = null;
 let toastTimer = null;
 let toastSeq = 0;
@@ -376,6 +674,12 @@ function formatDate(unixSeconds) {
   });
 }
 
+function formatClock(value) {
+  const time = new Date(value);
+  if (Number.isNaN(time.getTime())) return "";
+  return time.toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" });
+}
+
 function formatISODate(value) {
   if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return "";
   const date = new Date(`${value}T12:00:00`);
@@ -414,6 +718,27 @@ function setTheme(theme) {
   document.documentElement.dataset.theme = next;
   document.documentElement.style.colorScheme = next;
   try { localStorage.setItem("macro-theme", next); } catch { /* yoksay */ }
+}
+
+function currentAccent() {
+  const value = document.documentElement.dataset.accent;
+  return ACCENTS.some(accent => accent.id === value) ? value : "default";
+}
+
+function setAccent(accent) {
+  const next = ACCENTS.some(item => item.id === accent) ? accent : "default";
+  document.documentElement.dataset.accent = next;
+  try { localStorage.setItem("macro-accent", next); } catch { /* yoksay */ }
+}
+
+function lowPowerEnabled() {
+  return document.documentElement.dataset.lowPower === "1";
+}
+
+function setLowPower(enabled) {
+  if (enabled) document.documentElement.dataset.lowPower = "1";
+  else delete document.documentElement.dataset.lowPower;
+  try { localStorage.setItem("macro-low-power", enabled ? "1" : "0"); } catch { /* yoksay */ }
 }
 
 function sanitizeDescription(html) {
@@ -462,11 +787,13 @@ function sanitizeDescription(html) {
 
 function appIconHtml(app, extraClass = "") {
   const source = imageUrl(app?.icon);
-  return `<span class="app-icon${extraClass ? ` ${extraClass}` : ""}"><img class="app-img${source ? "" : " is-fallback"}" src="${source || FALLBACK_ICON}" alt="" loading="lazy"${source ? "" : ' data-fallback="1"'} /></span>`;
+  return `<span class="app-icon${extraClass ? ` ${extraClass}` : ""}"><img class="app-img${source ? "" : " is-fallback"}" src="${source || FALLBACK_ICON}" alt="" loading="lazy" decoding="async"${source ? "" : ' data-fallback="1"'} /></span>`;
 }
 
 function appTagsHtml(app, context = "") {
   const tags = [];
+  const provider = appProvider(app);
+  tags.push(`<span class="tag tag-source is-${attr(provider)}">${escapeHtml(providerName(provider))}</span>`);
   if (app.updateAvailable) tags.push('<span class="tag tag-update">Güncelleme</span>');
   if (app.pinned) tags.push('<span class="tag">Sabitlenmiş</span>');
   if (context === "search" && app.installed) tags.push('<span class="tag">Yüklü</span>');
@@ -477,7 +804,9 @@ function metaParts(app) {
   const parts = [providerManagerLabel(app)];
   if (app.developer) parts.push(app.developer);
   if (app.category) parts.push(categoryName(app.category));
-  if (app.installed && app.version) parts.push(`v${app.version}`);
+  if (app.installed && app.version) {
+    parts.push(/^\d/.test(app.version) ? `v${app.version}` : app.version);
+  }
   if (app.channel) parts.push(`Snap ${app.channel}`);
   if (app.monthlyInstalls) parts.push(`${formatCount(app.monthlyInstalls)} aylık kurulum`);
   return parts;
@@ -492,7 +821,63 @@ function providerMatches(app, selected) {
   return selected === "all" || appProvider(app) === selected;
 }
 
-const PROVIDER_SORT_ORDER = { flatpak: 0, snap: 1, brew: 2 };
+function searchMatches(app) {
+  if (!providerMatches(app, state.searchProvider)) return false;
+  if (state.searchVerifiedOnly && !app.verified) return false;
+  if (state.searchFreeOnly && !app.freeLicense) return false;
+  return true;
+}
+
+function searchFiltersActive() {
+  return state.searchVerifiedOnly || state.searchFreeOnly;
+}
+
+function searchFilterHtml() {
+  return `<div class="provider-filters" role="group" aria-label="${attr(t("search.filters.label"))}">
+    <button class="chip" type="button" data-search-flag="verified" aria-pressed="${state.searchVerifiedOnly}">
+      ${ICON.check}${t("search.verified")}
+    </button>
+    <button class="chip" type="button" data-search-flag="free" aria-pressed="${state.searchFreeOnly}">
+      ${t("search.freeLicense")}
+    </button>
+  </div>`;
+}
+
+const PROVIDER_SORT_ORDER = { flatpak: 0, snap: 1, brew: 2, appimage: 3 };
+
+function selectionKey(provider, id) {
+  return `${provider}:${id}`;
+}
+
+function isSelected(app) {
+  return state.selection.has(selectionKey(appProvider(app), app.id));
+}
+
+function selectedInstalledApps() {
+  return state.installed.filter(isSelected);
+}
+
+function toggleSelection(app) {
+  const key = selectionKey(appProvider(app), app.id);
+  if (state.selection.has(key)) state.selection.delete(key);
+  else state.selection.add(key);
+}
+
+function librarySearchMatches(app, needle) {
+  if (!needle) return true;
+  const haystack = `${app.name || ""} ${app.id || ""} ${app.developer || ""} ${app.summary || ""} ${providerName(appProvider(app))}`
+    .toLocaleLowerCase("tr");
+  return haystack.includes(needle);
+}
+
+function installedScopedApps() {
+  const needle = state.installedQuery.trim().toLocaleLowerCase("tr");
+  return state.installed.filter(app =>
+    providerMatches(app, state.installedProvider)
+    && (!state.updatesOnly || app.updateAvailable)
+    && librarySearchMatches(app, needle),
+  );
+}
 
 function sortInstalledApps(apps, sort) {
   const byName = (a, b) => String(a.name || a.id || "").localeCompare(String(b.name || b.id || ""), "tr", { sensitivity: "base" });
@@ -512,6 +897,12 @@ function matchesApps(provider, id) {
 }
 
 
+function favoriteButtonHtml(app, { large = false } = {}) {
+  const active = isFavorite(app);
+  const label = active ? "Favorilerden çıkar" : "Favorilere ekle";
+  return `<button class="icon-btn fav-btn${active ? " is-favorite" : ""}${large ? " fav-btn-lg" : ""}" type="button" data-favorite data-id="${attr(app.id)}" data-provider="${attr(appProvider(app))}" aria-pressed="${active}" title="${attr(label)}" aria-label="${attr(`${app.name || app.id} · ${label}`)}">${active ? ICON.starFilled : ICON.star}</button>`;
+}
+
 function actionButtonsHtml(app, { large = false, hero = false, allowRemove = true } = {}) {
   const size = large ? "btn-lg" : "btn-sm";
   const primary = hero ? `btn btn-hero-primary ${size}` : `btn btn-primary ${size}`;
@@ -522,28 +913,35 @@ function actionButtonsHtml(app, { large = false, hero = false, allowRemove = tru
   const actionAttrs = action => `data-action="${action}" data-id="${id}" data-provider="${attr(provider)}" aria-label="${attr(providerActionLabel(action, app))}"`;
 
   if (state.busy && sameApp(state.busy, provider, app.id)) {
-    const label = ACTIONS[state.busy.action]?.busy || "İşleniyor…";
+    const label = ACTIONS[state.busy.action]?.busy || t("action.busy");
     return `<button class="${primary}" type="button" disabled aria-label="${attr(providerActionLabel(state.busy.action, app))}"><span class="spinner"></span>${label}</button>`;
   }
 
   if (!app.installed) {
-    return `<button class="${primary}" type="button" ${actionAttrs("install")}${locked}>Kur</button>`;
+    return `<button class="${primary}" type="button" ${actionAttrs("install")}${locked}>${t("action.install")}</button>`;
   }
 
   const buttons = [];
-  if (app.updateAvailable) {
-    buttons.push(`<button class="${primary}" type="button" ${actionAttrs("update")}${locked}>Güncelle</button>`);
+  if (provider === "appimage") {
+    buttons.push(`<button class="${primary}" type="button" ${actionAttrs("launch")}${locked}>${t("action.open")}</button>`);
+  } else if (app.updateAvailable) {
+    buttons.push(`<button class="${primary}" type="button" ${actionAttrs("update")}${locked}>${t("action.update")}</button>`);
   }
   if (allowRemove) {
-    buttons.push(`<button class="${ghost}" type="button" ${actionAttrs("remove")}${locked}>Kaldır</button>`);
+    buttons.push(`<button class="${ghost}" type="button" ${actionAttrs("remove")}${locked}>${t("action.remove")}</button>`);
   }
   return buttons.join("");
 }
 
-function appRowHtml(app, context = "search") {
+function appRowHtml(app, context = "search", { selectable = false, selected = false } = {}) {
   const summary = String(app.summary || "").trim();
+  const selectAttrs = selectable
+    ? ` data-select-row="${attr(app.id)}" data-select-provider="${attr(appProvider(app))}"`
+    : "";
+  const role = selectable ? "option" : "link";
   return `
-    <article class="app-row" data-open-app="${attr(app.id)}" data-provider="${attr(appProvider(app))}" tabindex="0" role="link" aria-label="${attr(app.name || app.id)} (${attr(providerLabel(app))}) ayrıntıları">
+    <article class="app-row${selectable ? " is-selectable" : ""}${selected ? " is-selected" : ""}" data-open-app="${attr(app.id)}" data-provider="${attr(appProvider(app))}"${selectAttrs} tabindex="0" role="${role}" aria-selected="${selected}" aria-label="${attr(app.name || app.id)} (${attr(providerLabel(app))}) ayrıntıları">
+      ${selectable ? `<span class="select-check" aria-hidden="true">${selected ? "✓" : ""}</span>` : ""}
       ${appIconHtml(app)}
       <div class="app-body">
         <div class="app-line">
@@ -553,7 +951,7 @@ function appRowHtml(app, context = "search") {
         ${summary ? `<p class="app-summary">${escapeHtml(summary)}</p>` : ""}
         ${appMetaHtml(app)}
       </div>
-      <div class="app-actions">${actionButtonsHtml(app)}</div>
+      ${selectable ? "" : `<div class="app-actions">${favoriteButtonHtml(app)}${actionButtonsHtml(app)}</div>`}
     </article>`;
 }
 
@@ -589,7 +987,7 @@ function pickCardHtml(app) {
   return `
     <article class="pick-card" data-open-app="${attr(app.id)}" data-provider="${attr(appProvider(app))}" tabindex="0" role="link" aria-label="${attr(app.name || app.id)} (${attr(providerLabel(app))}) ayrıntıları">
       <div class="pick-media${hero ? "" : " is-placeholder"}">
-        ${hero ? `<img src="${hero}" alt="" loading="lazy" />` : ""}
+        ${hero ? `<img src="${hero}" alt="" loading="lazy" decoding="async" />` : ""}
       </div>
       <div class="pick-body">
         ${appIconHtml(app)}
@@ -1147,7 +1545,7 @@ async function runSetupInstall() {
 function updateStatus() {
   if (!state.storeInfo) {
     els.statusDot.className = "status-dot is-pending";
-    els.statusText.textContent = "Flatpak denetleniyor…";
+    els.statusText.textContent = t("status.checking");
     return;
   }
   if (!state.storeInfo.flatpakAvailable) {
@@ -1163,8 +1561,25 @@ function updateStatus() {
 
 function updateInstalledCount() {
   const count = state.installed.length;
-  els.installedCount.hidden = !state.installedLoaded || count === 0;
+  const updates = state.installed.filter(app => app.updateAvailable).length;
+  els.installedCount.hidden = !state.installedLoaded || count === 0 || updates > 0;
   els.installedCount.textContent = String(count);
+  els.updatesCount.hidden = !state.installedLoaded || updates === 0;
+  els.updatesCount.textContent = String(updates);
+  els.updatesCount.title = `${updates} güncelleme bekliyor`;
+  syncTrayBadge(updates);
+}
+
+function syncTrayBadge(updates) {
+  invoke("set_tray_updates", { count: updates }).catch(() => {
+    /* Tepsi simgesi yoksa güncelleme sayacı yalnızca arayüzde kalır. */
+  });
+}
+
+function updateFavoritesCount() {
+  const count = state.favorites.length;
+  els.favoritesCount.hidden = count === 0;
+  els.favoritesCount.textContent = String(count);
 }
 
 function updatePageTitle() {
@@ -1175,6 +1590,8 @@ function updatePageTitle() {
     document.title = `${CATEGORY_MAP[route.slug].name} — Macro Store`;
   } else if (route.name === "search" && state.query) {
     document.title = state.query.length >= 2 ? `“${state.query}” — Macro Store` : "Arama — Macro Store";
+  } else if (route.name === "favorites") {
+    document.title = "Favoriler — Macro Store";
   } else {
     document.title = "Macro Store — Linux Uygulama Mağazası";
   }
@@ -1185,6 +1602,7 @@ function renderChrome() {
     button.classList.toggle("is-active", button.dataset.nav === state.activeNav);
   });
   updateInstalledCount();
+  updateFavoritesCount();
   updateStatus();
   els.searchClear.hidden = !els.searchInput.value;
   els.backButton.hidden = !(state.stack.length > 1 && ["detail", "category"].includes(state.route.name));
@@ -1199,12 +1617,32 @@ function navForRoute(route) {
     case "categories":
     case "category":
       return "categories";
+    case "favorites":
+      return "favorites";
     case "installed":
       return "installed";
     case "settings":
       return "settings";
     default:
       return state.activeNav;
+  }
+}
+
+function openDeepLink(target) {
+  if (!target || typeof target !== "object") return;
+  if (target.kind === "app" && typeof target.id === "string" && target.id) {
+    const provider = target.provider || "flatpak";
+    els.main.scrollTop = 0;
+    navigate({ name: "detail", id: target.id, provider }, { root: true });
+    loadDetail(target.id, provider);
+    return;
+  }
+  if (target.kind === "search" && typeof target.query === "string") {
+    const query = target.query.trim();
+    if (!query) return;
+    els.searchInput.value = query;
+    navigate({ name: "search", query }, { root: true });
+    runSearch(query);
   }
 }
 
@@ -1300,9 +1738,29 @@ async function loadInstalled(force = false, silent = false) {
     state.installedProviderErrors = Array.isArray(response?.providerErrors)
       ? response.providerErrors
       : [];
+    state.installedFromCache = Boolean(response?.fromCache);
     state.installedVisibleCount = INSTALLED_PAGE_SIZE;
     state.installedLoaded = true;
     state.installedError = "";
+    state.lastRefreshed = Date.now();
+    try {
+      localStorage.setItem(LAST_REFRESH_KEY, String(state.lastRefreshed));
+    } catch {
+      /* Depolama kapalıysa saat yalnızca oturum boyunca tutulur. */
+    }
+    const available = new Set(state.installed.map(app => selectionKey(appProvider(app), app.id)));
+    for (const key of state.selection) {
+      if (!available.has(key)) state.selection.delete(key);
+    }
+    if (!state.installedProviderErrors.length) syncStoredFromInstalled();
+    invoke("library_usage")
+      .then(usage => {
+        state.libraryUsage = usage;
+        if (state.route.name === "installed") renderInstalled();
+      })
+      .catch(() => {
+        state.libraryUsage = null;
+      });
   } catch (err) {
     if (seq !== state.installedSeq) return;
     if (!silent) state.installedError = errText(err);
@@ -1313,6 +1771,25 @@ async function loadInstalled(force = false, silent = false) {
       renderIf("installed", renderInstalled);
     }
   }
+}
+
+function startUpdateWatch() {
+  if (updateTimer) return;
+  updateTimer = setInterval(() => {
+    if (document.hidden) return;
+    checkForUpdates();
+  }, UPDATE_WATCH_INTERVAL);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) checkForUpdates();
+  });
+}
+
+async function checkForUpdates() {
+  if (state.installedLoading || state.batch || state.busy) return;
+  const before = state.installed.filter(app => app.updateAvailable).length;
+  await loadInstalled(true, true);
+  const after = state.installed.filter(app => app.updateAvailable).length;
+  if (after > before) toast(`${after - before} yeni güncelleme hazır.`, "info");
 }
 
 function cancelPendingSearch() {
@@ -1329,15 +1806,151 @@ function resetSearch({ goDiscover = false, focus = false } = {}) {
   state.searchError = "";
   state.searchProviderErrors = [];
   els.searchInput.value = "";
+  hideSearchHistory();
   if (goDiscover && state.route.name === "search") {
     navigate({ name: "discover" }, { root: true });
   } else {
     renderChrome();
   }
-  if (focus) els.searchInput.focus();
+  if (focus) {
+    els.searchInput.focus();
+    renderSearchHistory();
+  }
 }
 
-async function runSearch(rawQuery) {
+function loadSearchHistory() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(SEARCH_HISTORY_KEY) || "[]");
+    if (!Array.isArray(raw)) return;
+    state.searchHistory = raw
+      .filter(item => typeof item === "string" && item.trim())
+      .slice(0, SEARCH_HISTORY_LIMIT);
+  } catch {
+    state.searchHistory = [];
+  }
+}
+
+function loadLastRefresh() {
+  try {
+    const value = Number(localStorage.getItem(LAST_REFRESH_KEY));
+    if (Number.isFinite(value) && value > 0) state.lastRefreshed = value;
+  } catch {
+    state.lastRefreshed = null;
+  }
+}
+
+function loadLibraryPrefs() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LIBRARY_PREFS_KEY) || "{}");
+    if (!raw || typeof raw !== "object") return;
+    if (PROVIDER_FILTERS.some(option => option.value === raw.provider)) {
+      state.installedProvider = raw.provider;
+    }
+    if (INSTALLED_SORTS.some(option => option.value === raw.sort)) {
+      state.installedSort = raw.sort;
+    }
+  } catch {
+    /* Tercihler okunamazsa varsayılanlar kullanılır. */
+  }
+}
+
+function saveLibraryPrefs() {
+  try {
+    localStorage.setItem(LIBRARY_PREFS_KEY, JSON.stringify({
+      provider: state.installedProvider,
+      sort: state.installedSort,
+    }));
+  } catch {
+    /* Depolama kapalıysa tercih yalnızca oturum boyunca tutulur. */
+  }
+}
+
+function loadActivityHistory() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(ACTIVITY_KEY) || "[]");
+    if (!Array.isArray(raw)) return;
+    state.activityHistory = raw
+      .filter(item => item && typeof item.name === "string" && Number.isFinite(item.time))
+      .slice(0, ACTIVITY_LIMIT);
+  } catch {
+    state.activityHistory = [];
+  }
+}
+
+function saveActivityHistory() {
+  try {
+    localStorage.setItem(ACTIVITY_KEY, JSON.stringify(state.activityHistory));
+  } catch {
+    /* Depolama kapalıysa geçmiş yalnızca oturum boyunca tutulur. */
+  }
+}
+
+function recordActivity({ action, app = null, name = "", ok = true, message = "" }) {
+  if (!ACTION_LABELS[action] && !name) return;
+  const entry = {
+    action: ACTION_LABELS[action] ? action : "batch",
+    label: ACTION_LABELS[action] ? actionLabel(action) : t("action.batch"),
+    name: name || app?.name || app?.id || "",
+    id: app?.id || "",
+    provider: app ? appProvider(app) : "",
+    ok: Boolean(ok),
+    message: String(message || "").slice(0, 180),
+    time: Date.now(),
+  };
+  state.activityHistory = [entry, ...state.activityHistory].slice(0, ACTIVITY_LIMIT);
+  saveActivityHistory();
+  if (state.route.name === "settings") renderSettings();
+}
+
+function activityTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const today = new Date();
+  if (date.toDateString() === today.toDateString()) return formatClock(value);
+  return formatDate(Math.floor(value / 1000));
+}
+
+function saveSearchHistory(list) {
+  state.searchHistory = list.slice(0, SEARCH_HISTORY_LIMIT);
+  try {
+    localStorage.setItem(SEARCH_HISTORY_KEY, JSON.stringify(state.searchHistory));
+  } catch {
+    /* Depolama kapalıysa geçmiş yalnızca oturum boyunca tutulur. */
+  }
+  renderSearchHistory();
+}
+
+function rememberSearch(rawQuery) {
+  const query = String(rawQuery || "").trim();
+  if (query.length < 2) return;
+  const normalized = query.toLocaleLowerCase("tr");
+  const next = [query, ...state.searchHistory.filter(item => item.toLocaleLowerCase("tr") !== normalized)];
+  saveSearchHistory(next);
+}
+
+function renderSearchHistory() {
+  const input = els.searchInput;
+  const shouldShow = document.activeElement === input
+    && !input.value.trim()
+    && state.searchHistory.length > 0;
+  if (!shouldShow) {
+    hideSearchHistory();
+    return;
+  }
+  els.searchHistory.innerHTML = `
+    <p class="search-history-label">Son aramalar</p>
+    ${state.searchHistory.map(item => `
+      <button type="button" role="option" data-history-query="${attr(item)}">
+        ${ICON.search}<span>${escapeHtml(item)}</span>
+      </button>`).join("")}`;
+  els.searchHistory.hidden = false;
+}
+
+function hideSearchHistory() {
+  els.searchHistory.hidden = true;
+}
+
+async function runSearch(rawQuery, { remember = false } = {}) {
   const query = String(rawQuery ?? "").trim();
   cancelPendingSearch();
   const seq = ++state.searchSeq;
@@ -1365,6 +1978,7 @@ async function runSearch(rawQuery) {
   state.searchError = "";
   state.searchProviderErrors = [];
   els.searchInput.value = query;
+  if (remember) rememberSearch(query);
 
   if (state.route.name !== "search") navigate({ name: "search" });
   else renderSearch();
@@ -1443,6 +2057,12 @@ async function loadCategory(slug, page = 1, reset = false) {
 
 async function loadDetail(id, provider = "flatpak", force = false) {
   if (!force && sameApp(state.detail?.app, provider, id)) {
+    if (provider === "flatpak" && state.detail?.app?.installed && !state.permissions && !state.permissionsLoading && !state.permissionsError) {
+      loadPermissions(id);
+    }
+    if (provider === "flatpak" && state.detail?.app?.installed && !state.commits.length && !state.commitsLoading && !state.commitsError) {
+      loadCommits(id);
+    }
     renderIf("detail", renderDetail);
     return;
   }
@@ -1457,12 +2077,70 @@ async function loadDetail(id, provider = "flatpak", force = false) {
     const data = await invoke("get_app_detail", { appId: id, provider });
     if (seq !== state.detailSeq) return;
     state.detail = data;
+    rememberRecent(data.app);
+    if (provider === "flatpak" && data?.app?.installed) {
+      loadPermissions(id);
+      loadCommits(id);
+    } else {
+      state.permissionsSeq += 1;
+      state.permissions = null;
+      state.permissionsLoading = false;
+      state.permissionsError = "";
+      state.commitsSeq += 1;
+      state.commits = [];
+      state.commitsLoading = false;
+      state.commitsError = "";
+    }
   } catch (err) {
     if (seq !== state.detailSeq) return;
     state.detailError = errText(err);
   } finally {
     if (seq === state.detailSeq) {
       state.detailLoading = false;
+      renderIf("detail", renderDetail);
+    }
+  }
+}
+
+async function loadCommits(appId) {
+  const seq = ++state.commitsSeq;
+  state.commits = [];
+  state.commitsLoading = true;
+  state.commitsError = "";
+  renderIf("detail", renderDetail);
+
+  try {
+    const data = await invoke("flatpak_commits", { appId });
+    if (seq !== state.commitsSeq) return;
+    state.commits = Array.isArray(data) ? data : [];
+  } catch (err) {
+    if (seq !== state.commitsSeq) return;
+    state.commitsError = errText(err);
+  } finally {
+    if (seq === state.commitsSeq) {
+      state.commitsLoading = false;
+      renderIf("detail", renderDetail);
+    }
+  }
+}
+
+async function loadPermissions(appId) {
+  const seq = ++state.permissionsSeq;
+  state.permissions = null;
+  state.permissionsLoading = true;
+  state.permissionsError = "";
+  renderIf("detail", renderDetail);
+
+  try {
+    const data = await invoke("get_app_permissions", { appId });
+    if (seq !== state.permissionsSeq) return;
+    state.permissions = data;
+  } catch (err) {
+    if (seq !== state.permissionsSeq) return;
+    state.permissionsError = errText(err);
+  } finally {
+    if (seq === state.permissionsSeq) {
+      state.permissionsLoading = false;
       renderIf("detail", renderDetail);
     }
   }
@@ -1561,6 +2239,7 @@ function renderRoute() {
     search: els.searchView,
     categories: els.categoriesView,
     category: els.categoryView,
+    favorites: els.favoritesView,
     installed: els.installedView,
     detail: els.detailView,
     settings: els.settingsView,
@@ -1582,6 +2261,9 @@ function renderRoute() {
       break;
     case "category":
       renderCategory();
+      break;
+    case "favorites":
+      renderFavorites();
       break;
     case "installed":
       renderInstalled();
@@ -1610,7 +2292,7 @@ function heroHtml(app) {
 
   return `
     <article class="hero-card" data-open-app="${attr(app.id)}" data-provider="${attr(appProvider(app))}" tabindex="0" role="link" aria-label="${attr(app.name || app.id)} (${attr(providerLabel(app))}) ayrıntıları">
-      <div class="hero-media${hero ? "" : " is-placeholder"}">${hero ? `<img src="${hero}" alt="" />` : ""}</div>
+      <div class="hero-media${hero ? "" : " is-placeholder"}">${hero ? `<img src="${hero}" alt="" decoding="async" fetchpriority="high" />` : ""}</div>
       <div class="hero-scrim"></div>
       <div class="hero-content">
         <span class="hero-kicker">Günün uygulaması</span>
@@ -1641,7 +2323,7 @@ function renderDiscover() {
       <header class="view-head">
         <div class="view-title">
           <p class="eyebrow">Flathub</p>
-          <h1>Keşfet</h1>
+          <h1>${t("nav.discover")}</h1>
         </div>
       </header>
       ${stateHtml({
@@ -1659,6 +2341,17 @@ function renderDiscover() {
   const hero = data.appOfDay;
 
   const sections = [];
+  const recentApps = state.recents.map(storedAppForView);
+  if (recentApps.length) {
+    sections.push(`
+      <section>
+        <div class="section-head">
+          <h2>Son görüntülenenler</h2>
+          <button class="chip" type="button" data-clear-recents>Temizle</button>
+        </div>
+        <div class="app-list">${recentApps.map(app => appRowHtml(app, "recent")).join("")}</div>
+      </section>`);
+  }
   if (picks.length) {
     sections.push(`
       <section>
@@ -1704,8 +2397,8 @@ function renderDiscover() {
     <header class="view-head">
       <div class="view-title">
         <p class="eyebrow">Flathub</p>
-        <h1>Keşfet</h1>
-        <p class="view-sub">Öne çıkan uygulamalar, haftanın seçkileri ve yeni eklenenler.</p>
+        <h1>${t("nav.discover")}</h1>
+        <p class="view-sub">${t("view.discover.sub")}</p>
       </div>
       <p class="view-note">${escapeHtml(formatISODate(data.date))}</p>
     </header>
@@ -1714,7 +2407,7 @@ function renderDiscover() {
 
 function renderSearch() {
   const query = state.query;
-  const visible = state.searchResults.filter(app => providerMatches(app, state.searchProvider));
+  const visible = state.searchResults.filter(searchMatches);
   const count = visible.length;
   const providerErrors = state.searchProviderErrors.filter(issue =>
     state.searchProvider === "all" || issue.provider === providerName(state.searchProvider),
@@ -1727,7 +2420,9 @@ function renderSearch() {
       ? "Aranıyor…"
       : state.searchError
         ? "Arama tamamlanamadı"
-        : `${count} sonuç`;
+        : searchFiltersActive()
+          ? `${count} sonuç · filtreli`
+          : `${count} sonuç`;
 
   let body;
   if (tooShort) {
@@ -1752,6 +2447,12 @@ function renderSearch() {
       retry: "search",
       icon: ICON.warning,
     });
+  } else if (!count && hasResults && searchFiltersActive()) {
+    body = stateHtml({
+      title: "Filtrelerle eşleşen sonuç yok",
+      text: "Etkin filtreleri kaldırın ya da farklı bir sağlayıcı seçin.",
+      icon: ICON.search,
+    }) + `<p class="view-note"><button class="chip" type="button" data-search-clear-filters>Filtreleri temizle</button></p>`;
   } else if (!count) {
     body = stateHtml({
       title: hasResults ? "Bu sağlayıcıda sonuç yok" : "Sonuç bulunamadı",
@@ -1776,14 +2477,15 @@ function renderSearch() {
     : `<div class="view-tools">
         <p class="view-note">${escapeHtml(meta)}</p>
         ${providerFilterHtml("search", state.searchProvider, state.searchResults)}
+        ${searchFilterHtml()}
       </div>`;
 
   els.searchView.innerHTML = `
     <header class="view-head">
       <div class="view-title">
-        <p class="eyebrow">Arama</p>
+        <p class="eyebrow">${t("view.search.eyebrow")}</p>
         <h1>“${escapeHtml(query)}”</h1>
-        <p class="view-sub">Flatpak, Snap ve Homebrew kataloglarında arama.</p>
+        <p class="view-sub">${t("view.search.sub")}</p>
       </div>
       ${controls}
     </header>
@@ -1796,10 +2498,10 @@ function renderCategories() {
     <header class="view-head">
       <div class="view-title">
         <p class="eyebrow">Flathub</p>
-        <h1>Kategoriler</h1>
-        <p class="view-sub">İlgi alanınıza göre uygulamalara göz atın.</p>
+        <h1>${t("nav.categories")}</h1>
+        <p class="view-sub">${t("view.categories.sub")}</p>
       </div>
-      <p class="view-note">${CATEGORY_LIST.length} kategori</p>
+      <p class="view-note">${t("view.categories.count", { count: CATEGORY_LIST.length })}</p>
     </header>
     <div class="category-grid">
       ${CATEGORY_LIST.map(category => `
@@ -1869,19 +2571,64 @@ function renderCategory() {
     ${body}`;
 }
 
+function renderFavorites() {
+  const apps = state.favorites.map(storedAppForView);
+  const installedCount = apps.filter(app => app.installed).length;
+  const summary = apps.length
+    ? `${apps.length} uygulama${installedCount ? ` · ${installedCount} yüklü` : ""}`
+    : "Kaydettiğiniz uygulamalar burada görünür.";
+
+  const body = apps.length
+    ? `<div class="app-list">${apps.map(app => appRowHtml(app, "favorites")).join("")}</div>`
+    : stateHtml({
+      title: "Henüz favori yok",
+      text: "Bir uygulamanın yıldızına dokunarak favorilerinize ekleyin. Liste cihazınızda saklanır.",
+      icon: ICON.star,
+      action: '<button class="btn btn-ghost" type="button" data-nav="discover">Keşfet’e göz at</button>',
+    });
+
+  els.favoritesView.innerHTML = `
+    <header class="view-head">
+      <div class="view-title">
+        <p class="eyebrow">${t("view.favorites.eyebrow")}</p>
+        <h1>${t("view.favorites.title")}</h1>
+        <p class="view-sub">${escapeHtml(summary)}</p>
+      </div>
+      ${apps.length ? `<div class="view-tools">
+        <button class="chip" type="button" data-clear-favorites>Favorileri temizle</button>
+      </div>` : ""}
+    </header>
+    ${storeNoticeHtml()}
+    ${body}`;
+}
+
 function renderInstalled() {
   const updates = state.installed.filter(app => app.updateAvailable).length;
   if (!updates) state.updatesOnly = false;
   const provider = state.installedProvider;
   const providerApps = state.installed.filter(app => providerMatches(app, provider));
-  const visible = sortInstalledApps(
-    state.updatesOnly ? providerApps.filter(app => app.updateAvailable) : providerApps,
-    state.installedSort,
-  );
+  const visible = sortInstalledApps(installedScopedApps(), state.installedSort);
+  const searchActive = Boolean(state.installedQuery.trim());
   const pending = providerApps.filter(app => app.updateAvailable).length;
   const countPool = state.updatesOnly
     ? state.installed.filter(app => app.updateAvailable)
     : state.installed;
+  const distribution = providerCounts(state.installed);
+  const distributionText = distribution
+    ? PROVIDER_FILTERS
+      .filter(option => option.value !== "all" && distribution[option.value] > 0)
+      .map(option => `${distribution[option.value]} ${option.label}`)
+      .join(" · ")
+    : "";
+  const summaryText = [
+    `${state.installed.length} uygulama`,
+    distributionText ? `(${distributionText})` : "",
+    updates ? `${updates} güncelleme` : "",
+    state.libraryUsage?.totalBytes ? `${formatBytes(state.libraryUsage.totalBytes)} Flatpak alanı` : "",
+    state.installedFromCache ? "önbellekten" : "",
+  ].filter(Boolean).join(" · ");
+  const refreshedText = state.lastRefreshed ? `Son kontrol: ${formatClock(state.lastRefreshed)}` : "";
+  const selectedApps = selectedInstalledApps();
   const providerErrors = state.installedProviderErrors.filter(issue =>
     provider === "all" || issue.provider === provider,
   );
@@ -1902,6 +2649,13 @@ function renderInstalled() {
       text: providerErrors.map(issue => `${providerName(issue.provider)}: ${issue.message}`).join(" · "),
       retry: "installed",
       icon: ICON.warning,
+    });
+  } else if (!visible.length && searchActive) {
+    body = stateHtml({
+      title: "Kitaplıkta sonuç yok",
+      text: `“${state.installedQuery.trim()}” için yüklü uygulama bulunamadı. Farklı bir ad ya da sağlayıcı deneyin.`,
+      icon: ICON.search,
+      action: '<button class="btn btn-ghost" type="button" data-clear-installed-search>Aramayı temizle</button>',
     });
   } else if (!visible.length) {
     const providerNameText = provider === "all" ? "" : providerName(provider);
@@ -1927,7 +2681,10 @@ function renderInstalled() {
     const more = remaining > 0
       ? `<div class="load-more"><button class="btn btn-ghost" type="button" data-installed-more>Daha fazla göster (${remaining})</button></div>`
       : "";
-    body = `<div class="app-list">${visibleApps.map(app => appRowHtml(app, "installed")).join("")}</div>${more}`;
+    body = `<div class="app-list">${visibleApps.map(app => appRowHtml(app, "installed", {
+      selectable: state.selectionMode,
+      selected: isSelected(app),
+    })).join("")}</div>${more}`;
   }
 
   const providerNotice = providerErrors.length && visible.length
@@ -1940,22 +2697,40 @@ function renderInstalled() {
   els.installedView.innerHTML = `
     <header class="view-head">
       <div class="view-title">
-        <p class="eyebrow">Kitaplık</p>
-        <h1>Yüklü Uygulamalar</h1>
-        <p class="view-sub">${state.installed.length} uygulama${updates ? ` · ${updates} güncelleme` : ""}</p>
+        <p class="eyebrow">${t("view.favorites.eyebrow")}</p>
+        <h1>${t("nav.installed")}</h1>
+        <p class="view-sub">${escapeHtml(summaryText)}${refreshedText ? `<span class="dot">·</span>${escapeHtml(refreshedText)}` : ""}</p>
       </div>
-      ${state.installed.length ? `<div class="view-tools">
-        ${(pending || state.batch) ? `<button class="btn btn-primary btn-sm" type="button" data-update-all${state.busy || state.batch ? " disabled" : ""} aria-label="Bekleyen güncellemeleri sırayla uygula">
+      <div class="view-tools">
+        <button class="btn btn-ghost btn-sm" type="button" data-appimage-open>${t("appimage.add")}</button>
+        ${state.installed.length ? `<label class="library-search">
+          ${ICON.search}
+          <input type="search" data-installed-search value="${attr(state.installedQuery)}" placeholder="${t("search.placeholder")}" aria-label="${t("search.label")}" autocomplete="off" spellcheck="false" />
+        </label>
+        ${state.selectionMode ? `<div class="selection-actions">
+          <span class="selection-count">${selectedApps.length} seçili</span>
+          <button class="btn btn-ghost btn-sm" type="button" data-select-all>Tümünü seç</button>
+          <button class="btn btn-ghost btn-sm" type="button" data-copy-selected${selectedApps.length ? "" : " disabled"}>Seçilenleri kopyala</button>
+          <button class="btn btn-primary btn-sm" type="button" data-remove-selected${selectedApps.length ? "" : " disabled"}>Seçilenleri kaldır (${selectedApps.length})</button>
+        </div>` : ""}
+        ${!state.selectionMode && (pending || state.batch) ? `<button class="btn btn-primary btn-sm" type="button" data-update-all${state.busy || state.batch ? " disabled" : ""} aria-label="Bekleyen güncellemeleri sırayla uygula">
           ${state.batch
-            ? `<span class="spinner"></span>Güncelleniyor ${Math.min(state.batch.done + 1, state.batch.total)}/${state.batch.total}`
+            ? `<span class="spinner"></span>${state.batch.action === "remove" ? "Kaldırılıyor" : "Güncelleniyor"} ${Math.min(state.batch.done + state.batch.failed + 1, state.batch.total)}/${state.batch.total}`
             : `Tümünü güncelle (${pending})`}
         </button>` : ""}
-        ${updates ? `<button class="chip" type="button" data-updates-filter aria-pressed="${state.updatesOnly}">
+        ${state.batch ? `<button class="chip" type="button" data-batch-cancel>Vazgeç</button>` : ""}
+        ${!state.selectionMode && updates ? `<button class="chip" type="button" data-updates-filter aria-pressed="${state.updatesOnly}">
           Güncellemeler <span>${updates}</span>
         </button>` : ""}
         ${providerFilterHtml("installed", provider, countPool)}
-        ${sortFilterHtml()}
-      </div>` : ""}
+        ${state.selectionMode ? "" : sortFilterHtml()}
+        ${!state.selectionMode ? `<button class="chip" type="button" data-copy-installed>Listeyi kopyala</button>` : ""}
+        ${!state.selectionMode && pending ? `<button class="chip" type="button" data-copy-updates>Güncelleme komutlarını kopyala</button>` : ""}
+        <button class="chip" type="button" data-selection-toggle aria-pressed="${state.selectionMode}">
+          ${state.selectionMode ? "Seçimi kapat" : "Seç"}
+        </button>
+        ` : ""}
+      </div>
     </header>
     ${storeNoticeHtml()}
     ${providerNotice}
@@ -1964,6 +2739,13 @@ function renderInstalled() {
 
 function detailActionButtons(app) {
   return actionButtonsHtml(app, { large: true, allowRemove: true });
+}
+
+function maskButtonHtml(app, provider) {
+  if (provider !== "flatpak" || !app.installed) return "";
+  const pinned = Boolean(app.pinned);
+  const label = pinned ? "Güncellemeleri sürdür" : "Güncellemeleri durdur";
+  return `<button class="btn btn-ghost btn-sm" type="button" data-mask="${pinned ? "off" : "on"}" data-id="${attr(app.id)}" title="${attr(label)}" aria-label="${attr(`${app.name || app.id} · ${label}`)}">${pinned ? "Güncellemeleri sürdür" : "Güncellemeleri durdur"}</button>`;
 }
 
 function infoCardHtml(detail) {
@@ -2054,6 +2836,173 @@ function reviewsHtml(reviews) {
   }).join("")}</div>`;
 }
 
+const PERMISSION_GROUPS = {
+  Context: "Bağlam",
+  "Session Bus Policy": "Oturum veriyolu",
+  "System Bus Policy": "Sistem veriyolu",
+  Environment: "Ortam değişkenleri",
+};
+
+const PERMISSION_LABELS = {
+  shared: "Paylaşılan kaynaklar",
+  sockets: "Soketler",
+  devices: "Aygıtlar",
+  filesystems: "Dosya sistemi",
+  persistent: "Kalıcı dizinler",
+  features: "Özellikler",
+};
+
+const PERMISSION_VALUES = {
+  network: "Ağ erişimi",
+  ipc: "Süreçler arası iletişim",
+  x11: "X11 ekran",
+  wayland: "Wayland",
+  fallback_x11: "X11 yedeği",
+  pulseaudio: "Ses",
+  "!host": "Ana dizin kapalı",
+  host: "Tüm ana dizin",
+  "host:ro": "Ana dizin (salt okunur)",
+  "home:ro": "Ev dizini (salt okunur)",
+};
+
+function parsePermissions(raw) {
+  const groups = [];
+  let current = null;
+  for (const line of String(raw || "").split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+      current = { title: trimmed.slice(1, -1), items: [] };
+      groups.push(current);
+      continue;
+    }
+    if (!current) {
+      current = { title: "Diğer", items: [] };
+      groups.push(current);
+    }
+    const equals = trimmed.indexOf("=");
+    current.items.push(equals > 0
+      ? { key: trimmed.slice(0, equals), value: trimmed.slice(equals + 1) }
+      : { key: "", value: trimmed });
+  }
+  return groups;
+}
+
+function permissionValueLabel(value) {
+  const text = String(value || "").trim();
+  if (!text) return "—";
+  return PERMISSION_VALUES[text] || text;
+}
+
+function permissionsHtml() {
+  if (state.permissionsLoading) {
+    return `<section class="detail-section permissions-section">
+      <h2>İzinler</h2>
+      <p class="source-note">Flatpak izinleri okunuyor…</p>
+    </section>`;
+  }
+  if (state.permissionsError) {
+    return `<section class="detail-section permissions-section">
+      <h2>İzinler</h2>
+      <p class="permission-note">İzinler okunamadı: ${escapeHtml(state.permissionsError)}</p>
+      <button class="btn btn-ghost btn-sm" type="button" data-permissions-retry>Yeniden dene</button>
+    </section>`;
+  }
+  const permissions = state.permissions;
+  if (!permissions) return "";
+  if (!permissions.available) {
+    return `<section class="detail-section permissions-section">
+      <h2>İzinler</h2>
+      <p class="permission-note">Flatpak bu sistemde bulunamadığı için izinler okunamıyor.</p>
+    </section>`;
+  }
+  if (!permissions.installed) {
+    return `<section class="detail-section permissions-section">
+      <h2>İzinler</h2>
+      <p class="permission-note">İzinler yalnızca uygulama yüklendikten sonra görünür.</p>
+    </section>`;
+  }
+  const groups = parsePermissions(permissions.raw);
+  if (!groups.length) {
+    return `<section class="detail-section permissions-section">
+      <h2>İzinler</h2>
+      <p class="permission-note">Uygulama özel izin istemiyor; Flatpak sandbox varsayılanları geçerli.</p>
+    </section>`;
+  }
+  return `<section class="detail-section permissions-section">
+    <h2>İzinler <span class="source-note">flatpak info --show-permissions</span></h2>
+    <div class="permission-groups">
+      ${groups.map(group => `
+        <div class="permission-group">
+          <h3>${escapeHtml(PERMISSION_GROUPS[group.title] || group.title)}</h3>
+          <ul class="permission-list">
+            ${group.items.map(item => `
+              <li>
+                ${item.key ? `<span class="permission-key">${escapeHtml(PERMISSION_LABELS[item.key] || item.key)}</span>` : ""}
+                <span class="permission-values">
+                  ${String(item.value).split(";").filter(Boolean).map(value =>
+                    `<span class="permission-chip">${escapeHtml(permissionValueLabel(value))}</span>`).join("")}
+                </span>
+              </li>`).join("")}
+          </ul>
+        </div>`).join("")}
+    </div>
+  </section>`;
+}
+
+function commitsHtml() {
+  if (state.commitsLoading && !state.commits.length) {
+    return `<section class="detail-section"><h2>Sürüm geri alma</h2>${skeletonRows(2)}</section>`;
+  }
+  if (state.commitsError) {
+    return `<section class="detail-section">
+      <h2>Sürüm geri alma</h2>
+      <p class="source-note">${escapeHtml(state.commitsError)}</p>
+    </section>`;
+  }
+  if (!state.commits.length) return "";
+  const rows = state.commits.map((commit, index) => {
+    const label = commit.subject || `Kayıt ${commit.commit.slice(0, 7)}`;
+    const dateText = commit.date ? formatDate(commit.date) : "";
+    return `
+      <li class="commit-row">
+        <div class="commit-body">
+          <strong>${escapeHtml(label)}</strong>
+          <span class="commit-meta">
+            ${index === 0 ? '<span class="tag tag-update">Yüklü</span>' : ""}
+            ${commit.version ? `<span>${escapeHtml(commit.version)}</span>` : ""}
+            ${dateText ? `<span>${escapeHtml(dateText)}</span>` : ""}
+            <code class="commit-hash">${escapeHtml(commit.commit.slice(0, 7))}</code>
+          </span>
+        </div>
+        ${index === 0 ? "" : `<button class="btn btn-ghost btn-sm" type="button" data-rollback="${attr(commit.commit)}" data-id="${attr(state.detail?.app?.id || "")}" data-label="${attr(label)}">Bu sürüme dön</button>`}
+      </li>`;
+  }).join("");
+  return `<section class="detail-section">
+    <h2>Sürüm geri alma <span class="source-note">${state.commits.length} kayıt</span></h2>
+    <ol class="commit-list">${rows}</ol>
+    <p class="source-note">Geri dönmek paketi seçilen sürüme sabitler; sonraki güncellemeler duraklar.</p>
+  </section>`;
+}
+
+function releasesHtml(releases) {
+  if (!Array.isArray(releases) || !releases.length) return "";
+  return `<section class="detail-section releases-section">
+    <h2>Sürüm geçmişi <span class="source-note">${releases.length} sürüm</span></h2>
+    <ol class="release-list">
+      ${releases.map((release, index) => `
+        <li>
+          <span class="release-marker" aria-hidden="true"></span>
+          <div>
+            <strong>${escapeHtml(release.version)}</strong>
+            ${release.date ? `<span class="release-date">${escapeHtml(formatDate(release.date))}</span>` : ""}
+            ${index === 0 ? '<span class="tag tag-update">Son sürüm</span>' : ""}
+          </div>
+        </li>`).join("")}
+    </ol>
+  </section>`;
+}
+
 function renderDetail() {
   const detail = state.detail;
 
@@ -2094,7 +3043,7 @@ function renderDetail() {
         <div class="shots${screenshots.length === 1 ? " single" : ""}">
           ${screenshots.map((shot, index) => `
             <figure class="shot" data-shot="${index}" tabindex="0" role="button" aria-label="Görseli büyüt">
-              <img class="shot-img" src="${imageUrl(shot.url)}" alt="${attr(shot.caption || `${app.name} ekran görüntüsü`)}" loading="lazy" />
+              <img class="shot-img" src="${imageUrl(shot.url)}" alt="${attr(shot.caption || `${app.name} ekran görüntüsü`)}" loading="lazy" decoding="async" />
               ${shot.caption ? `<figcaption>${escapeHtml(shot.caption)}</figcaption>` : ""}
             </figure>`).join("")}
         </div>
@@ -2113,7 +3062,9 @@ function renderDetail() {
     ? "Açıklama, ekran görüntüleri ve sürüm bilgileri Flathub’dan; topluluk puanları ve yorumları ODRS’den alınır. Kurulum ve kaldırma işlemleri kullanıcı kapsamında Flatpak ile yapılır."
     : provider === "snap"
       ? "Snap işlemleri sistem kapsamında yönetilir. İşlem sırasında sistem yetkilendirme penceresi açılabilir."
-      : "Kurulum, güncelleme ve kaldırma işlemleri Homebrew paket yöneticisiyle yönetilir.";
+      : provider === "appimage"
+        ? "Bu uygulama yerel bir AppImage dosyasıdır. Dosya Macro Store veri dizininde saklanır; güncellemek için yeni sürümü yeniden içe aktarın."
+        : "Kurulum, güncelleme ve kaldırma işlemleri Homebrew paket yöneticisiyle yönetilir.";
   const command = cliCommand(app);
 
   els.detailView.innerHTML = `
@@ -2134,7 +3085,10 @@ function renderDetail() {
         ${tags.length ? `<div class="detail-tags">${tags.join("")}</div>` : ""}
         <div class="detail-actions">
           ${detailActionButtons(app)}
+          ${favoriteButtonHtml(app, { large: true })}
+          ${maskButtonHtml(app, provider)}
           ${command ? `<button class="btn btn-ghost btn-sm" type="button" data-copy-command="${attr(command)}" title="${attr(command)}" aria-label="CLI kurulum komutunu kopyala">${ICON.copy}Komutu kopyala</button>` : ""}
+          <button class="btn btn-ghost btn-sm" type="button" data-cli data-id="${attr(app.id)}" data-provider="${attr(provider)}">CLI komutları</button>
           <span class="detail-size">${detail.downloadSize ? `İndirme: ${formatBytes(detail.downloadSize)} · ` : ""}${escapeHtml(providerInstallInfo(app))}</span>
         </div>
       </div>
@@ -2147,6 +3101,10 @@ function renderDetail() {
           <h2>Açıklama</h2>
           ${description ? `<div class="prose">${description}</div>` : '<p class="prose">Açıklama sağlanmamış.</p>'}
         </section>
+        ${isFlatpak && app.installed ? permissionsHtml() : ""}
+        ${isFlatpak && app.installed ? commitsHtml() : ""}
+        ${snapChannelHtml(app)}
+        ${releasesHtml(detail.releases)}
         ${communityContent}
       </div>
       <aside class="detail-side">
@@ -2158,8 +3116,75 @@ function renderDetail() {
     <p class="detail-footnote">${providerNote}</p>`;
 }
 
+async function loadBrewTaps(force = false) {
+  if (!state.storeInfo?.brewAvailable) {
+    state.brewTaps = [];
+    return;
+  }
+  if (!force && (state.brewTapsLoading || state.brewTaps.length)) return;
+  state.brewTapsLoading = true;
+  state.brewTapsError = "";
+  renderIf("settings", renderSettings);
+  try {
+    const taps = await invoke("list_brew_taps");
+    state.brewTaps = Array.isArray(taps) ? taps : [];
+  } catch (err) {
+    state.brewTapsError = errText(err);
+  } finally {
+    state.brewTapsLoading = false;
+    renderIf("settings", renderSettings);
+  }
+}
+
+async function runBrewTap(action, name) {
+  const command = action === "add" ? "add_brew_tap" : "remove_brew_tap";
+  try {
+    const message = await invoke(command, { name });
+    toast(message || "Tap güncellendi.", "success");
+    await loadBrewTaps(true);
+  } catch (err) {
+    toast(errText(err), "error");
+  }
+}
+
+const SNAP_CHANNELS = ["latest/stable", "latest/candidate", "latest/beta", "latest/edge"];
+
+function snapChannelHtml(app) {
+  if (appProvider(app) !== "snap" || !app.installed) return "";
+  const current = app.channel || "";
+  return `<section class="detail-section">
+    <h2>Snap kanalı <span class="source-note">${escapeHtml(current || "bilinmiyor")}</span></h2>
+    <div class="channel-row">
+      ${SNAP_CHANNELS.map(channel => `
+        <button class="chip" type="button" data-snap-channel="${attr(channel)}" data-id="${attr(app.id)}" aria-pressed="${channel === current}">
+          ${escapeHtml(channel.replace("latest/", ""))}
+        </button>`).join("")}
+    </div>
+    <p class="source-note">Kanal değişikliği Snap paketini yeni sürüm akışına geçirir ve paketi yeniler.</p>
+  </section>`;
+}
+
+function currentLang() {
+  return window.MacroI18n ? window.MacroI18n.lang : "tr";
+}
+
+function languageOptionsHtml() {
+  const active = currentLang();
+  const codes = window.MacroI18n ? window.MacroI18n.SUPPORTED : ["tr"];
+  return codes.map(code => `
+        <button class="theme-card${code === active ? " is-active" : ""}" type="button" data-lang-choice="${attr(code)}" aria-pressed="${code === active}">
+          <span class="theme-label"><strong>${escapeHtml(t(`settings.language.${code}`))}</strong><span>${escapeHtml(code.toUpperCase())}</span></span>
+        </button>`).join("");
+}
+
 function renderSettings() {
   const theme = currentTheme();
+  const accent = currentAccent();
+  const lowPower = lowPowerEnabled();
+  const installedAppimageCount = state.installed.filter(app => appProvider(app) === "appimage").length;
+  const appimageCount = state.installedLoaded
+    ? installedAppimageCount
+    : Math.max(installedAppimageCount, Number(state.storeInfo?.appimageCount) || 0);
   let repoBody;
 
   if (state.remotesLoading && !state.remotes.length) {
@@ -2208,40 +3233,114 @@ function renderSettings() {
         : "Eklenmeli";
   const flatpakStatusClass = typeof flatpakAvailable !== "boolean" ? "is-pending" : flatpakReady ? "is-ok" : "is-error";
   const flathubStatusClass = typeof flathubAvailable !== "boolean" ? "is-pending" : flathubReady ? "is-ok" : "is-error";
+  const pruneBusy = state.busy?.action === "prune";
+  const brewReady = Boolean(state.storeInfo?.brewAvailable);
+  let brewBody = "";
+  if (brewReady) {
+    if (state.brewTapsLoading && !state.brewTaps.length) {
+      brewBody = skeletonRows(2);
+    } else if (state.brewTapsError) {
+      brewBody = stateHtml({
+        title: "Tap listesi alınamadı",
+        text: state.brewTapsError,
+        retry: "brew-taps",
+        icon: ICON.warning,
+      });
+    } else if (!state.brewTaps.length) {
+      brewBody = '<div class="repo-empty">Tanımlı Homebrew tap\'i bulunamadı.</div>';
+    } else {
+      brewBody = `<div class="repo-list">${state.brewTaps.map(name => `
+        <div class="repo-row">
+          <span class="repo-mark" aria-hidden="true">${ICON.repo}</span>
+          <div class="repo-body">
+            <div class="repo-title"><strong>${escapeHtml(name)}</strong></div>
+            <p class="repo-url">Homebrew tap</p>
+          </div>
+          <button class="repo-remove" type="button" data-remove-tap="${attr(name)}" title="Tap'i kaldır" aria-label="${attr(name)} tap'ini kaldır">${ICON.trash}</button>
+        </div>`).join("")}</div>`;
+    }
+    brewBody += `
+      <form class="tap-form" data-tap-form>
+        <input type="text" name="tap" placeholder="kullanici/tap" aria-label="Eklenecek Homebrew tap adı" autocomplete="off" spellcheck="false" pattern="[A-Za-z0-9@+_.-]+/[A-Za-z0-9@+_.-]+(/[A-Za-z0-9@+_.-]+)?" required />
+        <button class="btn btn-ghost btn-sm" type="submit">Tap ekle</button>
+      </form>`;
+  }
+  const activityBody = state.activityHistory.length
+    ? `<ul class="activity-list">
+        ${state.activityHistory.map(entry => `
+          <li class="activity-row">
+            <span class="status-dot ${entry.ok ? "is-ok" : "is-error"}" aria-hidden="true"></span>
+            <div class="activity-copy">
+              <div class="activity-title"><strong>${escapeHtml(entry.name || entry.label)}</strong><span>${escapeHtml(entry.label)}</span></div>
+              ${entry.message ? `<p>${escapeHtml(entry.message)}</p>` : ""}
+            </div>
+            <time datetime="${new Date(entry.time).toISOString()}">${escapeHtml(activityTime(entry.time))}</time>
+          </li>`).join("")}
+      </ul>
+      <button class="btn btn-ghost" type="button" data-clear-activity>${t("settings.clearActivity")}</button>`
+    : `<div class="repo-empty">${t("settings.activityEmpty")}</div>`;
 
   els.settingsView.innerHTML = `
     <header class="view-head">
       <div class="view-title">
         <p class="eyebrow">Macro Store</p>
-        <h1>Seçenekler</h1>
-        <p class="view-sub">Görünümü ve uygulama kaynaklarını yönetin.</p>
+        <h1>${t("nav.settings")}</h1>
+        <p class="view-sub">${t("view.settings.sub")}</p>
       </div>
-      <p class="view-note">Sürüm 0.3.0</p>
+      <p class="view-note">${t("view.settings.version", { version: APP_VERSION })}</p>
     </header>
 
     ${storeNoticeHtml()}
 
     <section class="settings-section">
       <div class="settings-head">
-        <h2>Görünüm</h2>
-        <p>Göz yormayan açık tonlar ya da koyu mağaza görünümü arasında geçiş yapın.</p>
+        <h2>${t("settings.appearance")}</h2>
+        <p>${t("settings.appearanceDesc")}</p>
       </div>
       <div class="theme-grid">
         <button class="theme-card${theme === "light" ? " is-active" : ""}" type="button" data-theme-choice="light" aria-pressed="${theme === "light"}">
           <span class="theme-preview light" aria-hidden="true"></span>
-          <span class="theme-label"><strong>Açık tema</strong><span>Yumuşak, aydınlık tonlar</span></span>
+          <span class="theme-label"><strong>${t("settings.themeLight")}</strong><span>${t("settings.themeLightDesc")}</span></span>
         </button>
         <button class="theme-card${theme === "dark" ? " is-active" : ""}" type="button" data-theme-choice="dark" aria-pressed="${theme === "dark"}">
           <span class="theme-preview dark" aria-hidden="true"></span>
-          <span class="theme-label"><strong>Koyu tema</strong><span>Düşük ışıkta rahat kullanım</span></span>
+          <span class="theme-label"><strong>${t("settings.themeDark")}</strong><span>${t("settings.themeDarkDesc")}</span></span>
         </button>
+      </div>
+      <div class="accent-row">
+        <span class="accent-label">${t("settings.accent")}</span>
+        ${ACCENTS.map(item => `<button class="accent-dot${accent === item.id ? " is-active" : ""}" type="button" data-accent-choice="${item.id}" aria-pressed="${accent === item.id}" title="${attr(t(item.labelKey))}" aria-label="${attr(`${t(item.labelKey)} ${t("settings.accent")}`)}"></button>`).join("")}
       </div>
     </section>
 
     <section class="settings-section">
       <div class="settings-head">
-        <h2>Sistem hazırlığı</h2>
-        <p>Flatpak kullanıcı kapsamında kurulur. Snap sistem kapsamında yönetilir; Homebrew kendi paket yöneticisini kullanır. Burada yalnızca algılanan kullanılabilirlik gösterilir.</p>
+        <h2>${t("settings.performance")}</h2>
+        <p>${t("settings.performanceDesc")}</p>
+      </div>
+      <div class="toggle-row">
+        <div class="toggle-text">
+          <h3>${t("settings.lowPower")}</h3>
+          <p>${t("settings.lowPowerDesc")}</p>
+        </div>
+        <button class="switch" type="button" role="switch" aria-checked="${lowPower}" data-low-power-toggle aria-label="${t("settings.lowPower")}"></button>
+      </div>
+    </section>
+
+    <section class="settings-section">
+      <div class="settings-head">
+        <h2>${t("settings.language")}</h2>
+        <p>${t("settings.languageDesc")}</p>
+      </div>
+      <div class="theme-grid">
+        ${languageOptionsHtml()}
+      </div>
+    </section>
+
+    <section class="settings-section">
+      <div class="settings-head">
+        <h2>${t("settings.setup")}</h2>
+        <p>${t("settings.setupDesc")}</p>
       </div>
       <div class="system-status">
         <div class="system-row">
@@ -2256,6 +3355,14 @@ function renderSettings() {
         </div>
         ${managerStatusRowHtml("Snap", state.storeInfo?.snapAvailable)}
         ${managerStatusRowHtml("Homebrew", state.storeInfo?.brewAvailable)}
+        <div class="system-row">
+          <span class="status-dot is-ok" aria-hidden="true"></span>
+          <span>AppImage</span>
+          <strong>${appimageCount ? escapeHtml(t("settings.appimageCount", { count: appimageCount })) : escapeHtml(t("settings.appimageReady"))}</strong>
+        </div>
+      </div>
+      <div class="settings-actions">
+        <button class="btn btn-ghost btn-sm" type="button" data-appimage-open>${t("appimage.add")}</button>
       </div>
       ${setup?.distroName ? `<p class="system-meta">${escapeHtml(setup.distroName)}${setup.packageManagerLabel ? ` · ${escapeHtml(setup.packageManagerLabel)}` : ""}</p>` : ""}
       <button class="btn btn-ghost" type="button" data-open-setup>${flatpakReady && flathubReady ? "Kurulum bilgilerini aç" : "Kurulum sihirbazını aç"}</button>
@@ -2263,8 +3370,8 @@ function renderSettings() {
 
     <section class="settings-section">
       <div class="settings-head">
-        <h2>Depolar</h2>
-        <p>Flathub varsayılan kaynaktır. Kullanıcı kapsamına özel Flatpak depoları ekleyebilirsiniz.</p>
+        <h2>${t("settings.remotes")}</h2>
+        <p>${t("settings.remotesDesc")}</p>
       </div>
       ${repoBody}
       <form id="repoForm" class="repo-form" autocomplete="off">
@@ -2276,12 +3383,41 @@ function renderSettings() {
 
     <section class="settings-section">
       <div class="settings-head">
+        <h2>${t("settings.activity")}</h2>
+        <p>${t("settings.activityDesc")}</p>
+      </div>
+      ${activityBody}
+    </section>
+
+    ${brewReady ? `<section class="settings-section">
+      <div class="settings-head">
+        <h2>${t("settings.taps")}</h2>
+        <p>${t("settings.tapsDesc")}</p>
+      </div>
+      ${brewBody}
+    </section>` : ""}
+
+    <section class="settings-section">
+      <div class="settings-head">
+        <h2>${t("settings.maintenance")}</h2>
+        <p>${t("settings.maintenanceDesc")}</p>
+      </div>
+      <div class="settings-actions">
+        <button class="btn btn-ghost" type="button" data-prune-runtimes${pruneBusy ? " disabled" : ""}>
+          ${pruneBusy ? "Temizleniyor…" : "Kullanılmayan çalışma zamanlarını temizle"}
+        </button>
+        ${state.libraryUsage?.totalBytes ? `<span class="source-note">${escapeHtml(formatBytes(state.libraryUsage.totalBytes))} Flatpak alanı kullanılıyor</span>` : ""}
+      </div>
+    </section>
+
+    <section class="settings-section">
+      <div class="settings-head">
         <h2>Mağaza bilgileri</h2>
       </div>
       <div class="about-lines">
-        <div><strong>Macro Store</strong> 0.3.0 · Linux uygulama mağazası</div>
+        <div><strong>Macro Store</strong> ${APP_VERSION} · Linux uygulama mağazası</div>
         <div>Flatpak: <strong>${escapeHtml(flatpakVersion)}</strong> · Kullanıcı kapsamı</div>
-        <div>Snap sistem kapsamında yönetilir; Homebrew paketleri kendi yöneticisiyle çalışır.</div>
+        <div>Snap sistem kapsamında yönetilir; Homebrew paketleri kendi yöneticisiyle çalışır. AppImage dosyaları yerel olarak saklanır.</div>
       </div>
     </section>`;
 }
@@ -2298,6 +3434,7 @@ function patchApp(app, action, provider, id) {
   } else if (action === "update") {
     app.updateAvailable = false;
   }
+  syncStoredApp(app);
 }
 
 function applyAction(action, provider, id) {
@@ -2308,6 +3445,8 @@ function applyAction(action, provider, id) {
     state.discover?.picks || [],
     state.discover?.popular || [],
     state.discover?.recent || [],
+    state.favorites,
+    state.recents,
   ];
   for (const list of lists) list.forEach(app => patchApp(app, action, provider, id));
   if (state.discover?.appOfDay) patchApp(state.discover.appOfDay, action, provider, id);
@@ -2332,8 +3471,134 @@ function applyAction(action, provider, id) {
   updateInstalledCount();
 }
 
+async function rollbackApp(id, commit, label) {
+  if (state.busy) return;
+  state.busy = { id, provider: "flatpak", action: "rollback", name: id };
+  showActivity(`${id} · “${label}” kaydına dönülüyor…`);
+  try {
+    const outcome = await invoke("rollback_flatpak_app", { id, commit });
+    if (!outcome?.success) throw new Error(outcome?.message || "Sürüm değiştirilemedi.");
+    recordActivity({
+      action: "rollback",
+      app: { id, provider: "flatpak", name: id },
+      ok: true,
+      message: outcome.message || "",
+    });
+    toast(outcome.message || "Sürüm değiştirildi.", "success");
+    if (state.installedLoaded) await loadInstalled(true, true);
+    if (state.detail?.app?.id === id) await loadDetail(id, "flatpak", true);
+  } catch (err) {
+    recordActivity({
+      action: "rollback",
+      app: { id, provider: "flatpak", name: id },
+      ok: false,
+      message: errText(err),
+    });
+    toast(errText(err), "error");
+  } finally {
+    state.busy = null;
+    hideActivity();
+    renderRoute();
+  }
+}
+
+async function setAppMask(id, masked) {
+  if (state.busy) return;
+  state.busy = { id, provider: "flatpak", action: masked ? "mask" : "unmask", name: id };
+  showActivity(`${id} · ${masked ? "güncellemeler durduruluyor" : "güncellemeler sürdürülüyor"}…`);
+  try {
+    const outcome = await invoke("set_app_mask", { id, masked });
+    if (!outcome?.success) throw new Error(outcome?.message || "İşlem tamamlanamadı.");
+    recordActivity({
+      action: masked ? "mask" : "unmask",
+      app: { id, provider: "flatpak", name: id },
+      ok: true,
+      message: outcome.message || "",
+    });
+    toast(outcome.message || "İşlem tamamlandı.", "success");
+    if (state.installedLoaded) await loadInstalled(true, true);
+    if (state.detail?.app?.id === id) await loadDetail(id, "flatpak", true);
+  } catch (err) {
+    toast(errText(err), "error");
+  } finally {
+    state.busy = null;
+    hideActivity();
+    renderRoute();
+  }
+}
+
+async function switchSnapChannel(id, channel) {
+  if (state.busy) return;
+  state.busy = { id, provider: "snap", action: "channel", name: id };
+  showActivity(`${id} · ${channel} kanalına geçiriliyor…`);
+  try {
+    const outcome = await invoke("switch_snap_channel", { id, channel });
+    if (!outcome?.success) throw new Error(outcome?.message || "Kanal değiştirilemedi.");
+    recordActivity({ action: "channel", app: { id, provider: "snap", name: id }, ok: true, message: outcome.message || "" });
+    toast(outcome.message || "Kanal değiştirildi.", "success");
+    if (state.detail?.app?.id === id) await loadDetail(id, "snap", true);
+    if (state.installedLoaded) await loadInstalled(true, true);
+  } catch (err) {
+    recordActivity({ action: "channel", app: { id, provider: "snap", name: id }, ok: false, message: errText(err) });
+    toast(errText(err), "error");
+  } finally {
+    state.busy = null;
+    hideActivity();
+    renderRoute();
+  }
+}
+
+async function runPruneRuntimes() {
+  if (state.busy) return;
+  state.busy = { id: "", provider: "flatpak", action: "prune", name: "Çalışma zamanları" };
+  showActivity("Kullanılmayan çalışma zamanları temizleniyor…");
+  renderSettings();
+  try {
+    const outcome = await invoke("prune_unused_runtimes");
+    if (!outcome?.success) throw new Error(outcome?.message || "Temizlik tamamlanamadı.");
+    state.libraryUsage = null;
+    recordActivity({ action: "prune", name: "Çalışma zamanları", ok: true, message: outcome.message || "" });
+    toast(outcome.message || "Temizlik tamamlandı.", "success");
+    if (state.installedLoaded) await loadInstalled(true, true);
+  } catch (err) {
+    recordActivity({ action: "prune", name: "Çalışma zamanları", ok: false, message: errText(err) });
+    toast(errText(err), "error");
+  } finally {
+    state.busy = null;
+    hideActivity();
+    if (state.route.name === "settings") renderSettings();
+    else renderRoute();
+  }
+}
+
+async function performLaunch(app) {
+  if (!app || state.busy) return;
+  const provider = appProvider(app);
+  if (provider !== "appimage") {
+    toast("Bu uygulama mağaza üzerinden başlatılamıyor.", "error");
+    return;
+  }
+  state.busy = { id: app.id, provider, action: "launch", name: app.name || app.id };
+  showActivity(`${app.name || app.id} açılıyor…`);
+  renderRoute();
+
+  try {
+    await invoke("launch_appimage_file", { id: app.id });
+    recordActivity({ action: "launch", app, ok: true, message: ACTIONS.launch.done });
+    toast(`${app.name || "AppImage"} başlatıldı.`, "success");
+  } catch (err) {
+    recordActivity({ action: "launch", app, ok: false, message: errText(err) });
+    toast(errText(err), "error");
+  } finally {
+    state.busy = null;
+    hideActivity(600);
+    renderRoute();
+  }
+}
+
 async function performAction(action, app) {
   if (!app || state.busy || !ACTIONS[action]) return;
+  if (action === "launch") return performLaunch(app);
   const provider = appProvider(app);
   state.busy = { id: app.id, provider, action, name: app.name || app.id };
   showActivity(`${app.name || app.id} · ${providerManagerLabel(app)} ${ACTIONS[action].verb}…`);
@@ -2345,8 +3610,10 @@ async function performAction(action, app) {
       throw new Error(outcome.message || "İşlem başarısız oldu.");
     }
     applyAction(action, provider, app.id);
+    recordActivity({ action, app, ok: true, message: outcome?.message || "" });
     toast(outcome?.message || ACTIONS[action].done, "success");
   } catch (err) {
+    recordActivity({ action, app, ok: false, message: errText(err) });
     toast(errText(err), "error");
     openLogModal();
   } finally {
@@ -2357,28 +3624,61 @@ async function performAction(action, app) {
   }
 }
 
-async function runUpdateAll() {
+function askUpdateAll() {
   if (state.busy || state.batch) return;
   const provider = state.installedProvider;
   const targets = state.installed.filter(app => app.updateAvailable && providerMatches(app, provider));
   if (!targets.length) return;
+  const providerText = provider === "all" ? "tüm sağlayıcılarda" : `${providerName(provider)} sağlayıcısında`;
+  const breakdown = providerCounts(targets);
+  const breakdownText = breakdown
+    ? PROVIDER_FILTERS
+      .filter(option => option.value !== "all" && breakdown[option.value] > 0)
+      .map(option => `${breakdown[option.value]} ${option.label}`)
+      .join(" · ")
+    : "";
+  askConfirm({
+    title: "Tümünü güncelle",
+    text: `${providerText} ${targets.length} uygulama sırayla güncellenecek${breakdownText ? ` (${breakdownText})` : ""}. İşlem sırasında uygulamalar yeniden başlatılabilir.`,
+    label: "Güncelle",
+    onConfirm: () => runBatchAction("update", targets),
+  });
+}
 
-  const batch = { total: targets.length, done: 0, failed: 0 };
+function askRemoveSelected() {
+  if (state.busy || state.batch) return;
+  const targets = selectedInstalledApps();
+  if (!targets.length) return;
+  askConfirm({
+    title: "Seçilenleri kaldır",
+    text: `${targets.length} uygulama sırayla kaldırılacak. Bu işlem geri alınamaz.`,
+    label: "Kaldır",
+    onConfirm: () => runBatchAction("remove", targets),
+  });
+}
+
+async function runBatchAction(action, targets) {
+  if (!ACTIONS[action] || state.busy || state.batch || !targets.length) return;
+  const batch = { action, total: targets.length, done: 0, failed: 0, cancel: false, canceled: false };
   state.batch = batch;
   renderRoute();
 
   for (const app of targets) {
+    if (batch.cancel) {
+      batch.canceled = true;
+      break;
+    }
     const appProviderName = appProvider(app);
-    state.busy = { id: app.id, provider: appProviderName, action: "update", name: app.name || app.id };
-    showActivity(`${app.name || app.id} · ${providerManagerLabel(app)} güncelleniyor… (${batch.done + batch.failed + 1}/${batch.total})`);
+    state.busy = { id: app.id, provider: appProviderName, action, name: app.name || app.id };
+    showActivity(`${app.name || app.id} · ${providerManagerLabel(app)} ${ACTIONS[action].verb}… (${batch.done + batch.failed + 1}/${batch.total})`);
     renderRoute();
 
     try {
-      const outcome = await invoke("update_app", { id: app.id, provider: appProviderName });
+      const outcome = await invoke(`${action}_app`, { id: app.id, provider: appProviderName });
       if (outcome && outcome.success === false) {
-        throw new Error(outcome.message || "Güncelleme başarısız oldu.");
+        throw new Error(outcome.message || "İşlem başarısız oldu.");
       }
-      applyAction("update", appProviderName, app.id);
+      applyAction(action, appProviderName, app.id);
       batch.done += 1;
     } catch (err) {
       batch.failed += 1;
@@ -2390,12 +3690,21 @@ async function runUpdateAll() {
   state.batch = null;
   hideActivity(900);
 
-  if (batch.failed) {
-    toast(`${batch.done} uygulama güncellendi, ${batch.failed} uygulama güncellenemedi.`, batch.done ? "success" : "error");
-    if (!batch.done) openLogModal();
-  } else {
-    toast(`${batch.total} uygulama güncellendi.`, "success");
+  if (action === "remove") {
+    state.selection.clear();
+    state.selectionMode = false;
   }
+
+  const noun = action === "remove" ? "kaldırıldı" : "güncellendi";
+  const failureNoun = action === "remove" ? "kaldırılamadı" : "güncellenemedi";
+  const parts = [];
+  if (batch.done) parts.push(`${batch.done} uygulama ${noun}`);
+  if (batch.failed) parts.push(`${batch.failed} uygulama ${failureNoun}`);
+  if (batch.canceled) parts.push("kalan işlem iptal edildi");
+  const message = parts.length ? `${parts.join(", ")}.` : "İşlem tamamlanmadı.";
+  recordActivity({ action, name: `${batch.total} uygulama`, ok: batch.failed === 0, message });
+  toast(message, batch.failed && !batch.done ? "error" : "success");
+  if (batch.failed && !batch.done) openLogModal();
 
   renderRoute();
   loadInstalled(true, true);
@@ -2403,6 +3712,15 @@ async function runUpdateAll() {
 
 function askRemove(app) {
   const provider = appProvider(app);
+  if (provider === "appimage") {
+    askConfirm({
+      title: "Uygulamayı kaldır",
+      text: `${app.name || app.id} mağaza kayıtlarından ve uygulama menüsünden kaldırılacak. İçe aktarılan dosya silinir. Bu işlem geri alınamaz.`,
+      label: "Kaldır",
+      onConfirm: () => performAction("remove", app),
+    });
+    return;
+  }
   const explanation = provider === "flatpak"
     ? "kullanıcı kapsamındaki Flatpak kurulumundan"
     : provider === "snap"
@@ -2476,7 +3794,7 @@ function scrollLogToEnd() {
 }
 
 function updateLogCount() {
-  els.logCount.textContent = `${state.logs.length} satır`;
+  els.logCount.textContent = t("log.lines", { count: state.logs.length });
 }
 
 function renderLog() {
@@ -2530,6 +3848,84 @@ function openLogModal() {
   renderLog();
   openModal(els.logModal);
   requestAnimationFrame(scrollLogToEnd);
+}
+
+/* ── AppImage içe aktarma ─────────────────────────── */
+
+function setAppImageError(message) {
+  if (!els.appimageError) return;
+  els.appimageError.textContent = message || "";
+  els.appimageError.hidden = !message;
+}
+
+function openAppImageModal() {
+  setAppImageError("");
+  if (els.appimagePath) els.appimagePath.value = "";
+  if (els.appimageName) els.appimageName.value = "";
+  openModal(els.appimageModal);
+  requestAnimationFrame(() => els.appimagePath?.focus());
+}
+
+async function pickAppImage() {
+  if (state.appimage.picking) return;
+  state.appimage.picking = true;
+  if (els.appimagePick) els.appimagePick.disabled = true;
+  try {
+    const path = await invoke("pick_appimage_file");
+    if (path) {
+      els.appimagePath.value = path;
+      const base = String(path).split(/[\\/]/).pop().replace(/\.appimage$/i, "");
+      if (els.appimageName && !els.appimageName.value.trim()) els.appimageName.value = base;
+      setAppImageError("");
+    }
+  } catch (err) {
+    setAppImageError(errText(err));
+  } finally {
+    state.appimage.picking = false;
+    if (els.appimagePick) els.appimagePick.disabled = false;
+  }
+}
+
+async function importAppImage() {
+  if (state.appimage.importing) return;
+  const path = String(els.appimagePath?.value || "").trim();
+  const name = String(els.appimageName?.value || "").trim();
+  if (!path) {
+    setAppImageError(t("appimage.chooseError"));
+    els.appimagePath?.focus();
+    return;
+  }
+
+  state.appimage.importing = true;
+  setAppImageError("");
+  const button = els.appimageImport;
+  if (button) {
+    button.disabled = true;
+    button.innerHTML = `<span class="spinner"></span>${t("appimage.importing")}`;
+  }
+  showActivity(t("appimage.importing"));
+
+  try {
+    const app = await invoke("import_appimage_file", { path, name: name || null });
+    toast(t("appimage.imported", { name: app?.name || "AppImage" }), "success");
+    closeModal(els.appimageModal);
+    state.installedLoaded = false;
+    await loadInstalled(true);
+    await loadStoreInfo();
+    if (app?.id && state.detail?.app?.id === app.id) loadDetail(app.id, "appimage", true);
+    if (state.route.name === "installed") renderInstalled();
+  } catch (err) {
+    const message = errText(err);
+    setAppImageError(message);
+    toast(message, "error");
+  } finally {
+    state.appimage.importing = false;
+    hideActivity(700);
+    if (button) {
+      button.disabled = false;
+      button.textContent = t("appimage.import");
+    }
+  }
 }
 
 /* ── Modallar ve görsel görüntüleyici ─────────────── */
@@ -2647,6 +4043,7 @@ function bindEvents() {
     els.searchClear.hidden = !els.searchInput.value;
     cancelPendingSearch();
     state.searchSeq += 1;
+    renderSearchHistory();
 
     if (!value) {
       resetSearch({ goDiscover: state.route.name === "search" });
@@ -2656,18 +4053,80 @@ function bindEvents() {
     searchTimer = setTimeout(() => runSearch(value), 380);
   });
 
+  els.searchInput.addEventListener("focus", () => renderSearchHistory());
+  els.searchInput.addEventListener("blur", () => {
+    window.setTimeout(() => {
+      if (document.activeElement !== els.searchInput) hideSearchHistory();
+    }, 120);
+  });
+
   els.searchInput.addEventListener("keydown", event => {
     if (event.key === "Enter") {
       event.preventDefault();
       cancelPendingSearch();
-      runSearch(els.searchInput.value);
+      runSearch(els.searchInput.value, { remember: true });
+      hideSearchHistory();
+    } else if (event.key === "Escape") {
+      hideSearchHistory();
     }
   });
 
+  const activateHistoryChip = button => {
+    els.searchInput.value = button.dataset.historyQuery || "";
+    els.searchClear.hidden = !els.searchInput.value;
+    hideSearchHistory();
+    runSearch(els.searchInput.value, { remember: true });
+  };
+
+  els.searchHistory.addEventListener("mousedown", event => {
+    const button = event.target instanceof Element ? event.target.closest("[data-history-query]") : null;
+    if (!button) return;
+    event.preventDefault();
+    activateHistoryChip(button);
+  });
+
+  els.searchHistory.addEventListener("click", event => {
+    if (event.detail !== 0) return;
+    const button = event.target instanceof Element ? event.target.closest("[data-history-query]") : null;
+    if (button) activateHistoryChip(button);
+  });
+
   els.searchClear.addEventListener("click", () => resetSearch({ goDiscover: true, focus: true }));
+
+  document.addEventListener("submit", event => {
+    const form = event.target instanceof Element ? event.target.closest("[data-tap-form]") : null;
+    if (!form) return;
+    event.preventDefault();
+    const field = form.querySelector("input[name=\"tap\"]");
+    const name = String(field?.value || "").trim();
+    if (!name) return;
+    form.reset();
+    runBrewTap("add", name);
+  });
+
+  document.addEventListener("input", event => {
+    const input = event.target instanceof Element ? event.target.closest("[data-installed-search]") : null;
+    if (!input || state.route.name !== "installed") return;
+    state.installedQuery = input.value;
+    state.installedVisibleCount = INSTALLED_PAGE_SIZE;
+    clearTimeout(installedSearchTimer);
+    installedSearchTimer = setTimeout(() => {
+      renderInstalled();
+      const next = $("[data-installed-search]");
+      if (next) {
+        next.focus();
+        next.setSelectionRange(next.value.length, next.value.length);
+      }
+    }, 120);
+  });
   els.backButton.addEventListener("click", goBack);
   els.refreshButton.addEventListener("click", refreshCurrent);
   els.logButton.addEventListener("click", openLogModal);
+  els.shortcutsButton.addEventListener("click", () => openModal(els.shortcutsModal));
+  els.cliCopyAll.addEventListener("click", () => {
+    const all = (state.cliCommands || []).map(item => `${item.label}: ${item.command}`).join("\n");
+    copyCommand(all);
+  });
   els.activityLog.addEventListener("click", openLogModal);
 
   els.logClear.addEventListener("click", () => {
@@ -2729,6 +4188,41 @@ function bindEvents() {
       copyCommand(copyTarget.dataset.copyCommand);
       return;
     }
+
+    const favoriteButton = target.closest("[data-favorite]");
+    if (favoriteButton) {
+      const id = favoriteButton.dataset.id;
+      const provider = favoriteButton.dataset.provider || "flatpak";
+      const app = findKnownApp(provider, id);
+      if (app) toggleFavorite(app);
+      return;
+    }
+
+    const clearFavorites = target.closest("[data-clear-favorites]");
+    if (clearFavorites) {
+      askConfirm({
+        title: "Favorileri temizle",
+        text: "Kaydedilen tüm favori uygulamalar listeden kaldırılacak. Yüklü uygulamalar etkilenmez.",
+        label: "Temizle",
+        onConfirm: () => {
+          state.favorites = [];
+          saveStoredApps(FAVORITES_KEY, state.favorites);
+          renderChrome();
+          renderFavorites();
+          toast("Favoriler temizlendi.", "success");
+        },
+      });
+      return;
+    }
+
+    const clearRecents = target.closest("[data-clear-recents]");
+    if (clearRecents) {
+      state.recents = [];
+      saveStoredApps(RECENTS_KEY, state.recents);
+      renderDiscover();
+      toast("Son görüntülenenler temizlendi.", "info");
+      return;
+    }
     const providerFilter = target.closest("[data-provider-filter]");
     if (providerFilter) {
       const scope = providerFilter.dataset.providerFilter;
@@ -2740,14 +4234,105 @@ function bindEvents() {
       } else if (scope === "installed") {
         state.installedProvider = provider;
         state.installedVisibleCount = INSTALLED_PAGE_SIZE;
+        saveLibraryPrefs();
         renderInstalled();
       }
       return;
     }
 
+    const searchFlag = target.closest("[data-search-flag]");
+    if (searchFlag) {
+      const flag = searchFlag.dataset.searchFlag;
+      if (flag === "verified") state.searchVerifiedOnly = !state.searchVerifiedOnly;
+      else if (flag === "free") state.searchFreeOnly = !state.searchFreeOnly;
+      else return;
+      renderSearch();
+      return;
+    }
+
+    if (target.closest("[data-search-clear-filters]")) {
+      state.searchVerifiedOnly = false;
+      state.searchFreeOnly = false;
+      renderSearch();
+      return;
+    }
+
+    const selectionToggle = target.closest("[data-selection-toggle]");
+    if (selectionToggle) {
+      state.selectionMode = !state.selectionMode;
+      if (!state.selectionMode) state.selection.clear();
+      renderInstalled();
+      return;
+    }
+
+    const batchCancel = target.closest("[data-batch-cancel]");
+    if (batchCancel && state.batch && !state.batch.cancel) {
+      state.batch.cancel = true;
+      batchCancel.disabled = true;
+      batchCancel.textContent = "İptal ediliyor…";
+      toast("Mevcut işlem bitince duracak.", "info");
+      return;
+    }
+
+    const selectAll = target.closest("[data-select-all]");
+    if (selectAll) {
+      installedScopedApps().forEach(app => state.selection.add(selectionKey(appProvider(app), app.id)));
+      renderInstalled();
+      return;
+    }
+
+    const copySelected = target.closest("[data-copy-selected]");
+    if (copySelected && !copySelected.disabled) {
+      const lines = selectedInstalledApps().map(app => `${app.name || app.id} (${providerLabel(app)})`);
+      copyCommand(lines.join("\n"));
+      return;
+    }
+
+    const copyInstalled = target.closest("[data-copy-installed]");
+    if (copyInstalled) {
+      const lines = sortInstalledApps(installedScopedApps(), state.installedSort)
+        .map(app => `${app.name || app.id} (${providerLabel(app)})${app.version ? ` · v${app.version}` : ""}`);
+      if (!lines.length) {
+        toast("Kopyalanacak uygulama yok.", "info");
+        return;
+      }
+      copyCommand(lines.join("\n"));
+      return;
+    }
+
+    const copyUpdates = target.closest("[data-copy-updates]");
+    if (copyUpdates) {
+      const lines = state.installed
+        .filter(app => app.updateAvailable && providerMatches(app, state.installedProvider))
+        .map(app => cliCommandsFor(app).find(item => item.label === "Güncelle")?.command || "")
+        .filter(Boolean);
+      if (!lines.length) {
+        toast("Kopyalanacak güncelleme komutu yok.", "info");
+        return;
+      }
+      copyCommand(lines.join("\n"));
+      return;
+    }
+
+    const clearInstalledSearch = target.closest("[data-clear-installed-search]");
+    if (clearInstalledSearch) {
+      state.installedQuery = "";
+      state.installedVisibleCount = INSTALLED_PAGE_SIZE;
+      renderInstalled();
+      const input = $("[data-installed-search]");
+      if (input) input.focus();
+      return;
+    }
+
+    const removeSelected = target.closest("[data-remove-selected]");
+    if (removeSelected && !removeSelected.disabled) {
+      askRemoveSelected();
+      return;
+    }
+
     const updateAll = target.closest("[data-update-all]");
     if (updateAll && !updateAll.disabled) {
-      runUpdateAll();
+      askUpdateAll();
       return;
     }
 
@@ -2756,10 +4341,20 @@ function bindEvents() {
       const sort = sortFilter.dataset.installedSort;
       if (!INSTALLED_SORTS.some(option => option.value === sort)) return;
       state.installedSort = sort;
+      saveLibraryPrefs();
       renderInstalled();
       return;
     }
 
+
+    const cliButton = target.closest("[data-cli]");
+    if (cliButton) {
+      const id = cliButton.dataset.id;
+      const provider = cliButton.dataset.provider || "flatpak";
+      const app = findKnownApp(provider, id);
+      if (app) openCliModal(app);
+      return;
+    }
 
     const actionButton = target.closest("[data-action]");
     if (actionButton && !actionButton.disabled) {
@@ -2784,12 +4379,130 @@ function bindEvents() {
       return;
     }
 
+    const rollbackButton = target.closest("[data-rollback]");
+    if (rollbackButton) {
+      const commit = rollbackButton.dataset.rollback;
+      const id = rollbackButton.dataset.id;
+      const label = rollbackButton.dataset.label || commit?.slice(0, 7);
+      if (!commit || !id) return;
+      askConfirm({
+        title: "Sürüme geri dön",
+        text: `${id} paketi “${label}” kaydına sabitlenecek. Yeni sürümler otomatik gelmez.`,
+        label: "Geri dön",
+        onConfirm: () => rollbackApp(id, commit, label),
+      });
+      return;
+    }
+
+    const maskButton = target.closest("[data-mask]");
+    if (maskButton) {
+      const id = maskButton.dataset.id;
+      const masked = maskButton.dataset.mask === "on";
+      if (!id) return;
+      askConfirm({
+        title: masked ? "Güncellemeleri durdur" : "Güncellemeleri sürdür",
+        text: masked
+          ? `${id} için otomatik güncellemeler durdurulacak. Uygulama kullanılmaya devam eder.`
+          : `${id} için güncellemeler yeniden etkinleştirilecek.`,
+        label: masked ? "Durdur" : "Sürdür",
+        onConfirm: () => setAppMask(id, masked),
+      });
+      return;
+    }
+
+    const removeTap = target.closest("[data-remove-tap]");
+    if (removeTap) {
+      const name = removeTap.dataset.removeTap;
+      askConfirm({
+        title: "Tap'i kaldır",
+        text: `${name} tap'i Homebrew yapılandırmasından çıkarılacak.`,
+        label: "Kaldır",
+        onConfirm: () => runBrewTap("remove", name),
+      });
+      return;
+    }
+
+    const channelButton = target.closest("[data-snap-channel]");
+    if (channelButton) {
+      const channel = channelButton.dataset.snapChannel;
+      const id = channelButton.dataset.id;
+      if (!channel || !id) return;
+      askConfirm({
+        title: "Snap kanalını değiştir",
+        text: `${id} paketi “${channel}” kanalına geçirilecek ve yenilenecek.`,
+        label: "Değiştir",
+        onConfirm: () => switchSnapChannel(id, channel),
+      });
+      return;
+    }
+
+    const pruneButton = target.closest("[data-prune-runtimes]");
+    if (pruneButton && !pruneButton.disabled) {
+      askConfirm({
+        title: "Çalışma zamanlarını temizle",
+        text: "Hiçbir uygulamanın kullanmadığı Flatpak çalışma zamanları kaldırılacak. Yüklü uygulamalar etkilenmez.",
+        label: "Temizle",
+        onConfirm: () => runPruneRuntimes(),
+      });
+      return;
+    }
+
+    const clearActivity = target.closest("[data-clear-activity]");
+    if (clearActivity) {
+      state.activityHistory = [];
+      saveActivityHistory();
+      renderSettings();
+      toast("İşlem geçmişi temizlendi.", "info");
+      return;
+    }
+
     const themeChoice = target.closest("[data-theme-choice]");
     if (themeChoice) {
       const theme = themeChoice.dataset.themeChoice;
       setTheme(theme);
       if (state.route.name === "settings") renderSettings();
       toast(theme === "light" ? "Açık tema etkin." : "Koyu tema etkin.", "info");
+      return;
+    }
+
+    const accentChoice = target.closest("[data-accent-choice]");
+    if (accentChoice) {
+      setAccent(accentChoice.dataset.accentChoice);
+      if (state.route.name === "settings") renderSettings();
+      toast(t("settings.accentUpdated"), "info");
+      return;
+    }
+
+    const lowPowerToggle = target.closest("[data-low-power-toggle]");
+    if (lowPowerToggle) {
+      const next = !lowPowerEnabled();
+      setLowPower(next);
+      if (state.route.name === "settings") renderSettings();
+      toast(next ? t("settings.lowPowerOn") : t("settings.lowPowerOff"), "info");
+      return;
+    }
+
+    const appimageOpen = target.closest("[data-appimage-open]");
+    if (appimageOpen) {
+      openAppImageModal();
+      return;
+    }
+
+    const appimagePick = target.closest("[data-appimage-pick]");
+    if (appimagePick) {
+      pickAppImage();
+      return;
+    }
+
+    const appimageImport = target.closest("[data-appimage-import]");
+    if (appimageImport) {
+      importAppImage();
+      return;
+    }
+
+    const langChoice = target.closest("[data-lang-choice]");
+    if (langChoice) {
+      if (window.MacroI18n) window.MacroI18n.setLang(langChoice.dataset.langChoice);
       return;
     }
 
@@ -2800,7 +4513,10 @@ function bindEvents() {
       navigate({ name: page }, { root: true });
       if (page === "installed") loadInstalled();
       if (page === "discover") loadDiscover();
-      if (page === "settings") loadRemotes();
+      if (page === "settings") {
+        loadRemotes();
+        loadBrewTaps();
+      }
       if (page === "categories") updatePageTitle();
       return;
     }
@@ -2821,6 +4537,20 @@ function bindEvents() {
       return;
     }
 
+    if (state.selectionMode) {
+      const selectRow = target.closest("[data-select-row]");
+      if (selectRow) {
+        const id = selectRow.dataset.selectRow;
+        const provider = selectRow.dataset.selectProvider || "flatpak";
+        const app = state.installed.find(item => sameApp(item, provider, id));
+        if (app) {
+          toggleSelection(app);
+          renderInstalled();
+        }
+        return;
+      }
+    }
+
     const open = target.closest("[data-open-app]");
     if (open) {
       const id = open.dataset.openApp;
@@ -2834,6 +4564,12 @@ function bindEvents() {
       return;
     }
 
+    const permissionsRetry = target.closest("[data-permissions-retry]");
+    if (permissionsRetry && state.route.name === "detail") {
+      loadPermissions(state.route.id);
+      return;
+    }
+
     const retry = target.closest("[data-retry]");
     if (retry) {
       const kind = retry.dataset.retry;
@@ -2843,6 +4579,7 @@ function bindEvents() {
       else if (kind === "category") loadCategory(state.route.slug, 1, true);
       else if (kind === "detail") loadDetail(state.route.id, appProvider(state.route), true);
       else if (kind === "remotes") loadRemotes(true);
+      else if (kind === "brew-taps") loadBrewTaps(true);
       return;
     }
 
@@ -2942,11 +4679,32 @@ function bindEvents() {
       return;
     }
 
+    if ((event.key === "?" || event.key === "F1") && !isTypingTarget(event.target) && !openModalEl) {
+      event.preventDefault();
+      openModal(els.shortcutsModal);
+      return;
+    }
+
     if (event.key === "/" && !isTypingTarget(event.target)) {
       event.preventDefault();
       els.searchInput.focus();
       els.searchInput.select();
       return;
+    }
+
+    const plainKey = !event.metaKey && !event.ctrlKey && !event.altKey;
+    if (plainKey && !openModalEl && !isTypingTarget(event.target)) {
+      const key = event.key.toLowerCase();
+      if (key === "r") {
+        event.preventDefault();
+        refreshCurrent();
+        return;
+      }
+      if (key === "f" && state.route.name === "detail" && state.detail?.app) {
+        event.preventDefault();
+        toggleFavorite(state.detail.app);
+        return;
+      }
     }
 
     if ((event.key === "Enter" || event.key === " ") && !isTypingTarget(event.target)) {
@@ -3003,12 +4761,23 @@ function bindEvents() {
 }
 
 async function init() {
+  loadSearchHistory();
+  loadLastRefresh();
+  state.favorites = readStoredApps(FAVORITES_KEY);
+  state.recents = readStoredApps(RECENTS_KEY).slice(0, RECENTS_LIMIT);
+  loadActivityHistory();
+  loadLibraryPrefs();
   bindEvents();
+  startUpdateWatch();
   setTheme(currentTheme());
 
   try {
+    await listen("deep-link-open", event => openDeepLink(event.payload));
     await listen("app-log", event => appendLog(event.payload));
     await listen("setup-log", event => appendSetupLog(event.payload));
+    await listen("tray-check-updates", () => {
+      checkForUpdates();
+    });
     await listen("app-finished", event => {
       if (event.payload && event.payload.success === false && !openModalEl) openLogModal();
     });
@@ -3016,11 +4785,21 @@ async function init() {
     /* Günlük olayları kullanılamıyorsa arayüz çalışmaya devam eder. */
   }
 
+  document.addEventListener("macro-lang-change", () => {
+    renderRoute();
+    loadStoreInfo();
+  });
+
   loadStoreInfo();
   loadInstalled(true, true);
   loadDiscover();
   renderRoute();
   maybeOpenSetup();
+  invoke("take_pending_deep_link")
+    .then(target => {
+      if (target) openDeepLink(target);
+    })
+    .catch(() => {});
 }
 
 /* ── Tarayıcı önizlemesi için sahte arka uç ────────── */
@@ -3064,6 +4843,7 @@ const MOCK = {
   installed: new Set(mockLoad("macro-mock-installed", ["org.mozilla.firefox", "org.videolan.VLC"])),
   updates: new Set(mockLoad("macro-mock-updates", ["org.videolan.VLC"])),
   setup: mockLoad("macro-mock-setup", { flatpak: true, flathub: true }),
+  appimages: mockLoad("macro-mock-appimages", []),
   remotes: mockLoad("macro-mock-remotes", [
     { name: "flathub", title: "Flathub", url: "https://dl.flathub.org/repo/", scope: "user", comment: "Flathub uygulama deposu", icon: "https://dl.flathub.org/repo/logo.svg", deletable: false },
     { name: "flathub", title: "Flathub", url: "https://dl.flathub.org/repo/", scope: "system", comment: "Flathub uygulama deposu", icon: "https://dl.flathub.org/repo/logo.svg", deletable: false },
@@ -3072,6 +4852,7 @@ const MOCK = {
 };
 
 if (!Array.isArray(MOCK.remotes)) MOCK.remotes = [];
+if (!Array.isArray(MOCK.appimages)) MOCK.appimages = [];
 if (!MOCK.setup || typeof MOCK.setup !== "object") {
   MOCK.setup = { flatpak: true, flathub: true };
 }
@@ -3169,6 +4950,21 @@ function mockAppFromAppstream(appstream) {
   };
 }
 
+function mockReleaseItems(appstream) {
+  const releases = Array.isArray(appstream?.releases) ? appstream.releases : [];
+  return releases
+    .filter(release => String(release?.version || "").trim())
+    .slice(0, 8)
+    .map(release => {
+      const raw = release.timestamp;
+      const parsed = typeof raw === "number" ? raw : Number(String(raw || "").trim());
+      return {
+        version: String(release.version).trim(),
+        date: Number.isFinite(parsed) && parsed > 0 ? parsed : null,
+      };
+    });
+}
+
 async function mockAppstream(id) {
   if (MOCK.appCache.has(id)) return MOCK.appCache.get(id);
   const appstream = await mockFetchJson(`${FLATHUB}/appstream/${encodeURIComponent(id)}`);
@@ -3192,6 +4988,9 @@ function mockApiApp(hit) {
     category: normalizeCategory(hit.main_categories) || mockCategoryFromAppstream(hit.categories),
     monthlyInstalls: hit.installs_last_month || null,
     heroImage: hit.hero_image || null,
+    verified: Boolean(hit.verification_verified),
+    license: hit.project_license || null,
+    freeLicense: Boolean(hit.is_free_license),
   };
 }
 
@@ -3226,7 +5025,8 @@ async function mockDiscover(date) {
 }
 
 async function mockSearch(query) {
-  if (String(query || "").trim().length < 2) {
+  const needle = String(query || "").trim().toLocaleLowerCase("tr");
+  if (needle.length < 2) {
     throw new Error("Arama için en az 2 karakter yazın.");
   }
   try {
@@ -3311,6 +5111,27 @@ function mockReviews(app) {
 }
 
 async function mockDetail(id, provider = "flatpak") {
+  if (provider === "appimage") {
+    const entry = MOCK.appimages.find(item => item.id === id);
+    if (!entry) throw new Error("AppImage kaydı bulunamadı.");
+    const app = mockAppImageItem(entry);
+    return {
+      app,
+      description: `Bu AppImage Macro Store üzerinden içe aktarıldı. Dosya konumu: ${entry.path}. Uygulama, sistemdeki diğer AppImage’lar gibi bağımsız çalışır; mağaza üzerinden kaldırılabilir veya yeniden başlatılabilir.`,
+      screenshots: [],
+      categories: [],
+      license: "",
+      verified: false,
+      homepage: null,
+      downloadSize: entry.size,
+      installedSize: entry.size,
+      installsLastMonth: null,
+      rating: null,
+      reviews: [],
+      releases: [],
+    };
+  }
+
   if (provider === "snap") {
     const installed = state.installed.find(app => sameApp(app, "snap", id));
     const app = installed || {
@@ -3343,6 +5164,7 @@ async function mockDetail(id, provider = "flatpak") {
       installsLastMonth: null,
       rating: null,
       reviews: [],
+      releases: [],
     };
   }
 
@@ -3380,6 +5202,7 @@ async function mockDetail(id, provider = "flatpak") {
       installsLastMonth: null,
       rating: null,
       reviews: [],
+      releases: [],
     };
   }
   const { appstream } = await mockAppstream(id);
@@ -3445,7 +5268,88 @@ async function mockDetail(id, provider = "flatpak") {
     installsLastMonth: stats?.installs_last_month || null,
     rating,
     reviews,
+    releases: mockReleaseItems(appstream),
   };
+}
+
+function mockAppImageItem(entry) {
+  return {
+    id: entry.id,
+    provider: "appimage",
+    packageType: null,
+    name: entry.name,
+    summary: "Macro Store üzerinden içe aktarılan AppImage",
+    developer: "Yerel AppImage",
+    version: "Yerel",
+    icon: entry.icon || null,
+    installed: true,
+    updateAvailable: false,
+    pinned: false,
+    channel: null,
+    category: null,
+    monthlyInstalls: null,
+    heroImage: null,
+    verified: false,
+    license: null,
+    freeLicense: false,
+  };
+}
+
+function mockAppImageSlug(value) {
+  return String(value || "")
+    .toLocaleLowerCase("tr")
+    .replace(/[çğıöşü]/g, char => ({ ç: "c", ğ: "g", ı: "i", ö: "o", ş: "s", ü: "u" })[char] || char)
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64) || "appimage";
+}
+
+function mockPickAppImage() {
+  return "/home/kullanıcı/İndirilenler/MacroOrnek.AppImage";
+}
+
+function mockImportAppImage(path, name) {
+  const clean = String(path || "").trim();
+  if (!/\.appimage$/i.test(clean)) {
+    throw new Error("Seçilen dosya bir .AppImage değil.");
+  }
+  const base = clean.split(/[\\/]/).pop() || "Uygulama.AppImage";
+  const display = String(name || "").trim() || base.replace(/\.appimage$/i, "");
+  const baseSlug = mockAppImageSlug(display);
+  let id = baseSlug;
+  let suffix = 2;
+  while (MOCK.appimages.some(item => item.id === id)) {
+    id = `${baseSlug}-${suffix}`;
+    suffix += 1;
+  }
+  const entry = {
+    id,
+    name: display,
+    path: clean,
+    icon: null,
+    size: 42 * 1024 * 1024,
+    importedAt: Math.floor(Date.now() / 1000),
+  };
+  MOCK.appimages.push(entry);
+  mockSave("macro-mock-appimages", MOCK.appimages);
+  emitMock("app-log", { line: `✓ ${display} AppImage olarak içe aktarıldı.`, kind: "info" });
+  return mockAppImageItem(entry);
+}
+
+function mockRemoveAppImage(id) {
+  const before = MOCK.appimages.length;
+  MOCK.appimages = MOCK.appimages.filter(entry => entry.id !== id);
+  if (MOCK.appimages.length === before) throw new Error("AppImage bulunamadı.");
+  mockSave("macro-mock-appimages", MOCK.appimages);
+  emitMock("app-log", { line: "✓ AppImage kaldırıldı.", kind: "info" });
+  return "AppImage kaldırıldı.";
+}
+
+function mockLaunchAppImage(id) {
+  const entry = MOCK.appimages.find(item => item.id === id);
+  if (!entry) throw new Error("AppImage bulunamadı.");
+  emitMock("app-log", { line: `✓ ${entry.name} başlatıldı.`, kind: "info" });
+  return null;
 }
 
 async function mockInstalledApps() {
@@ -3497,6 +5401,24 @@ function mockRemoveRemote(name) {
 }
 
 async function mockOperation(action, id, provider = "flatpak") {
+  if (provider === "appimage") {
+    if (action !== "remove") {
+      throw new Error(action === "install"
+        ? "AppImage kurulumu için “AppImage içe aktar” akışını kullanın."
+        : "AppImage dosyaları mağaza üzerinden güncellenemez.");
+    }
+    const message = mockRemoveAppImage(id);
+    const outcome = {
+      success: true,
+      code: null,
+      message,
+      appId: id,
+      action,
+      manager: "AppImage",
+    };
+    emitMock("app-finished", outcome);
+    return outcome;
+  }
   if (provider !== "flatpak") {
     throw new Error("Tarayıcı demosunda bu sağlayıcı için örnek uygulama yok.");
   }
@@ -3619,6 +5541,10 @@ async function mockInstallFlatpak() {
 }
 
 async function mockInvoke(command, args = {}) {
+  if (command === "set_tray_updates") {
+    return null;
+  }
+
   if (command === "get_setup_status") {
     await sleep(260);
     return mockSetupStatus();
@@ -3635,6 +5561,7 @@ async function mockInvoke(command, args = {}) {
       flatpakVersion: MOCK.setup.flatpak ? "1.18.4" : null,
       flathubAvailable: Boolean(MOCK.setup.flathub),
       userFlathubAvailable: Boolean(MOCK.setup.flathub),
+      appimageCount: MOCK.appimages.length,
     };
   }
 
@@ -3643,7 +5570,7 @@ async function mockInvoke(command, args = {}) {
   }
 
   if (command === "search_apps") {
-    return { apps: mockSearch(args.query), providerErrors: [] };
+    return { apps: await mockSearch(args.query), providerErrors: [] };
   }
 
   if (command === "get_category") {
@@ -3654,11 +5581,135 @@ async function mockInvoke(command, args = {}) {
     return mockDetail(args.appId || args.app_id, args.provider || "flatpak");
   }
 
+  if (command === "get_app_permissions") {
+    await sleep(160);
+    const id = args.appId || args.app_id || "";
+    const installed = MOCK.installed.has(id);
+    return {
+      installed,
+      available: true,
+      raw: installed
+        ? `[Context]\nshared=network;ipc;\nsockets=x11;wayland;pulseaudio;\nfilesystems=home;host:ro;\n\n[Session Bus Policy]\norg.freedesktop.portal.Desktop=talk`
+        : "",
+    };
+  }
+
   if (command === "list_installed_apps") {
     await sleep(180);
+    const flatpakApps = MOCK.setup.flatpak ? await mockInstalledApps() : [];
     return {
-      apps: MOCK.setup.flatpak ? mockInstalledApps() : [],
+      apps: [...flatpakApps, ...MOCK.appimages.map(mockAppImageItem)]
+        .sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "tr", { sensitivity: "base" })),
       providerErrors: [],
+    };
+  }
+
+  if (command === "list_appimages") {
+    await sleep(120);
+    return MOCK.appimages.map(mockAppImageItem);
+  }
+
+  if (command === "pick_appimage_file") {
+    await sleep(160);
+    return mockPickAppImage();
+  }
+
+  if (command === "import_appimage_file") {
+    await sleep(420);
+    return mockImportAppImage(args.path, args.name);
+  }
+
+  if (command === "remove_appimage_file") {
+    await sleep(260);
+    return mockRemoveAppImage(args.id);
+  }
+
+  if (command === "launch_appimage_file") {
+    await sleep(180);
+    return mockLaunchAppImage(args.id);
+  }
+
+  if (command === "library_usage") {
+    const apps = MOCK.setup.flatpak ? await mockInstalledApps() : [];
+    return {
+      totalBytes: apps.length * 120 * 1024 * 1024,
+      apps: apps.length,
+    };
+  }
+
+  if (command === "take_pending_deep_link") {
+    return null;
+  }
+
+  if (command === "flatpak_commits") {
+    await sleep(160);
+    const now = Math.floor(Date.now() / 1000);
+    return [
+      { commit: "3f8f1a9d2b4c5e6f70819a2b3c4d5e6f70819a2b", subject: "Update to 2.10.0", date: now - 86400 * 3, version: "2.10.0" },
+      { commit: "7c2b9e0f1a3d5b7c9e1f2a4b6c8d0e2f4a6b8c0d", subject: "Fix crash on start", date: now - 86400 * 21, version: "2.8.2" },
+      { commit: "1a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d", subject: "Update to 2.8.0", date: now - 86400 * 48, version: "2.8.0" },
+    ];
+  }
+
+  if (command === "rollback_flatpak_app") {
+    await sleep(420);
+    return {
+      success: true,
+      code: null,
+      message: `${args.id} seçilen sürüme sabitlendi.`,
+      appId: args.id,
+      action: "rollback",
+      manager: "Flatpak",
+    };
+  }
+
+  if (command === "set_app_mask") {
+    await sleep(300);
+    return {
+      success: true,
+      code: null,
+      message: args.masked
+        ? `${args.id} için güncellemeler durduruldu.`
+        : `${args.id} için güncellemeler yeniden etkinleştirildi.`,
+      appId: args.id,
+      action: args.masked ? "mask" : "unmask",
+      manager: "Flatpak",
+    };
+  }
+
+  if (command === "list_brew_taps") {
+    await sleep(150);
+    return ["homebrew/cask-fonts", "homebrew/cask-versions"];
+  }
+
+  if (command === "add_brew_tap" || command === "remove_brew_tap") {
+    await sleep(300);
+    return command === "add_brew_tap"
+      ? `${args.name} tap'i eklendi.`
+      : `${args.name} tap'i kaldırıldı.`;
+  }
+
+  if (command === "switch_snap_channel") {
+    await sleep(400);
+    return {
+      success: true,
+      code: null,
+      message: `Snap ${args.id} ${args.channel} kanalına geçirildi.`,
+      appId: args.id,
+      action: "channel",
+      manager: "Snap",
+    };
+  }
+
+  if (command === "prune_unused_runtimes") {
+    await sleep(400);
+    return {
+      success: true,
+      code: null,
+      message: "Kullanılmayan çalışma zamanları temizlendi.",
+      appId: "",
+      action: "prune",
+      manager: "Flatpak",
     };
   }
 

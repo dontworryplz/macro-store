@@ -889,6 +889,38 @@ pub async fn action(id: &str, action: &str) -> Result<String, String> {
     .map_err(|error| format!("Snap işlemi başlatılamadı: {error}"))?
 }
 
+fn valid_snap_channel(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value.as_bytes()[0].is_ascii_alphanumeric()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-'))
+}
+
+pub async fn switch_channel(id: &str, channel: &str) -> Result<String, String> {
+    if !valid_snap_token(id) {
+        return Err("Snap adı veya kimliği geçersiz.".to_string());
+    }
+    if !valid_snap_channel(channel) {
+        return Err("Snap kanalı geçersiz.".to_string());
+    }
+    let id = id.to_string();
+    let channel = channel.to_string();
+    tokio::task::spawn_blocking(move || {
+        let flag = format!("--channel={channel}");
+        let result = run_snap(&["switch", &flag, &id], ACTION_TIMEOUT, false, true);
+        invalidate_cache();
+        let output = result?;
+        if !output.status.success() {
+            return Err(command_failure(&format!("snap switch {id}"), &output));
+        }
+        Ok(format!("Snap {id} {channel} kanalına geçirildi."))
+    })
+    .await
+    .map_err(|error| format!("Snap kanal değişikliği başlatılamadı: {error}"))?
+}
+
 fn usable_version_output(output: &str) -> bool {
     let mut snap_version = false;
     let mut daemon_version = false;

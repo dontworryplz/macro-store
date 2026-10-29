@@ -1,5 +1,9 @@
+mod appimage;
 mod brew;
 mod snap;
+mod tray;
+
+use tauri_plugin_deep_link::DeepLinkExt;
 
 use base64::Engine as _;
 use futures::future::join_all;
@@ -17,7 +21,7 @@ use std::sync::{
     Arc, Mutex, OnceLock,
 };
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, BufReader as AsyncBufReader};
 use tokio::process::Command as AsyncCommand;
 
@@ -82,10 +86,20 @@ const CATEGORIES: [&str; 11] = [
 
 const FLATPAK_CACHE_TTL: Duration = Duration::from_secs(15);
 const FLATPAK_VERSION_TTL: Duration = Duration::from_secs(30);
+const APPSTREAM_CACHE_TTL: Duration = Duration::from_secs(300);
+const APPSTREAM_CACHE_LIMIT: usize = 96;
+const JSON_CACHE_TTL: Duration = Duration::from_secs(120);
+const JSON_CACHE_LIMIT: usize = 256;
 type FlatpakStateCache = Mutex<Option<(Instant, Arc<FlatpakSnapshot>)>>;
 type FlatpakVersionCache = Mutex<Option<(Instant, Option<String>)>>;
+type AppstreamCache = Mutex<HashMap<String, (Instant, Appstream)>>;
+type JsonCache = Mutex<HashMap<String, (Instant, Value)>>;
+type IconCache = Mutex<HashMap<String, Option<String>>>;
 static FLATPAK_STATE_CACHE: OnceLock<FlatpakStateCache> = OnceLock::new();
 static FLATPAK_VERSION_CACHE: OnceLock<FlatpakVersionCache> = OnceLock::new();
+static APPSTREAM_CACHE: OnceLock<AppstreamCache> = OnceLock::new();
+static JSON_CACHE: OnceLock<JsonCache> = OnceLock::new();
+static ICON_CACHE: OnceLock<IconCache> = OnceLock::new();
 static OPERATING: AtomicBool = AtomicBool::new(false);
 static SETTING_UP: AtomicBool = AtomicBool::new(false);
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -94,7 +108,9 @@ static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 struct FlatpakSnapshot {
     installed: HashSet<String>,
     updates: HashSet<String>,
+    masked: HashSet<String>,
     apps: Vec<FlatpakInstalled>,
+    items: Vec<AppItem>,
 }
 
 struct OperationLock;
@@ -122,9 +138,10 @@ struct StoreInfo {
     user_flathub_available: bool,
     snap_available: bool,
     brew_available: bool,
+    appimage_count: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AppItem {
     id: String,
@@ -142,6 +159,12 @@ struct AppItem {
     category: Option<String>,
     monthly_installs: Option<u64>,
     hero_image: Option<String>,
+    #[serde(default)]
+    verified: bool,
+    #[serde(default)]
+    license: Option<String>,
+    #[serde(default)]
+    free_license: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -156,6 +179,8 @@ struct ProviderIssue {
 struct InstalledAppsResponse {
     apps: Vec<AppItem>,
     provider_errors: Vec<ProviderIssue>,
+    #[serde(default)]
+    from_cache: bool,
 }
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -193,6 +218,22 @@ struct ReviewItem {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ReleaseItem {
+    version: String,
+    date: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct FlatpakCommit {
+    commit: String,
+    subject: String,
+    date: Option<i64>,
+    version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct AppDetail {
     app: AppItem,
     description: String,
@@ -206,6 +247,15 @@ struct AppDetail {
     installs_last_month: Option<u64>,
     rating: Option<RatingSummary>,
     reviews: Vec<ReviewItem>,
+    releases: Vec<ReleaseItem>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppPermissions {
+    installed: bool,
+    available: bool,
+    raw: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -299,6 +349,7 @@ struct FlatpakInstalled {
     name: String,
     summary: String,
     version: String,
+    installed_size: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -367,6 +418,12 @@ struct ApiApp {
     main_categories: Option<StringOrVec>,
     #[serde(default)]
     installs_last_month: Option<u64>,
+    #[serde(default)]
+    verification_verified: Option<bool>,
+    #[serde(default)]
+    project_license: Option<String>,
+    #[serde(default)]
+    is_free_license: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -398,7 +455,7 @@ struct ApiAppOfDay {
     app_id: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct ApiScreenshotSize {
     #[serde(default)]
     width: String,
@@ -406,7 +463,7 @@ struct ApiScreenshotSize {
     src: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct ApiScreenshot {
     #[serde(default)]
     sizes: Vec<ApiScreenshotSize>,
@@ -414,19 +471,21 @@ struct ApiScreenshot {
     caption: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct ApiRelease {
     #[serde(default)]
     version: Option<String>,
+    #[serde(default)]
+    timestamp: Option<Value>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 struct ApiUrls {
     #[serde(default)]
     homepage: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct Appstream {
     #[serde(default)]
     id: String,
@@ -885,7 +944,7 @@ fn read_flatpak_user_list() -> Vec<FlatpakInstalled> {
             "list",
             "--user",
             "--app",
-            "--columns=application,name,description,version",
+            "--columns=application,name,description,version,size",
         ],
     ) else {
         return Vec::new();
@@ -894,6 +953,137 @@ fn read_flatpak_user_list() -> Vec<FlatpakInstalled> {
         return Vec::new();
     }
     parse_flatpak_user_list(&output.stdout)
+}
+
+fn parse_flatpak_size(value: &str) -> Option<u64> {
+    let text = value.trim().replace(',', ".");
+    let mut parts = text.split_whitespace();
+    let amount = parts.next()?.parse::<f64>().ok()?;
+    if !amount.is_finite() || amount < 0.0 {
+        return None;
+    }
+    let unit = parts.next().unwrap_or("bytes").to_ascii_lowercase();
+    let factor = match unit.as_str() {
+        "b" | "byte" | "bytes" => 1.0,
+        "kb" | "kib" | "k" => 1024.0,
+        "mb" | "mib" | "m" => 1024.0 * 1024.0,
+        "gb" | "gib" | "g" => 1024.0 * 1024.0 * 1024.0,
+        "tb" | "tib" | "t" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        _ => return None,
+    };
+    Some((amount * factor).round() as u64)
+}
+
+fn valid_commit_hash(value: &str) -> bool {
+    (7..=64).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = year - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+fn parse_flatpak_date(value: &str) -> Option<i64> {
+    let mut parts = value.split_whitespace();
+    let date = parts.next()?;
+    let time = parts.next()?;
+    let zone = parts.next().unwrap_or("+0000");
+
+    let mut date_parts = date.split('-');
+    let year = date_parts.next()?.parse::<i64>().ok()?;
+    let month = date_parts.next()?.parse::<i64>().ok()?;
+    let day = date_parts.next()?.parse::<i64>().ok()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+
+    let mut time_parts = time.split(':');
+    let hour = time_parts.next()?.parse::<i64>().ok()?;
+    let minute = time_parts.next()?.parse::<i64>().ok()?;
+    let second = time_parts.next().unwrap_or("0").parse::<i64>().ok()?;
+    if hour > 23 || minute > 59 || second > 60 {
+        return None;
+    }
+
+    let offset = if zone.starts_with('+') || zone.starts_with('-') {
+        let digits: String = zone[1..].chars().filter(char::is_ascii_digit).collect();
+        if digits.len() < 4 {
+            return None;
+        }
+        let hours = digits[..2].parse::<i64>().ok()?;
+        let minutes = digits[2..4].parse::<i64>().ok()?;
+        let magnitude = hours * 3600 + minutes * 60;
+        if zone.starts_with('-') {
+            -magnitude
+        } else {
+            magnitude
+        }
+    } else {
+        0
+    };
+
+    Some(days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second - offset)
+}
+
+fn parse_remote_info_log(text: &str) -> Vec<FlatpakCommit> {
+    let mut commits: Vec<FlatpakCommit> = Vec::new();
+    let mut current: Option<FlatpakCommit> = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let key = key.trim().to_ascii_lowercase();
+        let value = value.trim();
+        match key.as_str() {
+            "commit" => {
+                if let Some(done) = current.take() {
+                    if valid_commit_hash(&done.commit) {
+                        commits.push(done);
+                    }
+                }
+                if valid_commit_hash(value) {
+                    current = Some(FlatpakCommit {
+                        commit: value.to_string(),
+                        subject: String::new(),
+                        date: None,
+                        version: None,
+                    });
+                }
+            }
+            "subject" => {
+                if let Some(commit) = current.as_mut() {
+                    commit.subject = truncate_chars(value, 200);
+                }
+            }
+            "date" => {
+                if let Some(commit) = current.as_mut() {
+                    commit.date = parse_flatpak_date(value);
+                }
+            }
+            "version" => {
+                if let Some(commit) = current.as_mut() {
+                    commit.version = Some(truncate_chars(value, 64));
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(done) = current.take() {
+        if valid_commit_hash(&done.commit) {
+            commits.push(done);
+        }
+    }
+    commits.truncate(20);
+    commits
 }
 
 fn parse_flatpak_user_list(text: &str) -> Vec<FlatpakInstalled> {
@@ -909,6 +1099,7 @@ fn parse_flatpak_user_list(text: &str) -> Vec<FlatpakInstalled> {
             name: fields.next().unwrap_or(app_id).trim().to_string(),
             summary: truncate_chars(fields.next().unwrap_or("").trim(), 500),
             version: fields.next().unwrap_or("").trim().to_string(),
+            installed_size: fields.next().and_then(parse_flatpak_size),
         });
     }
     apps.sort_by_key(|app| app.name.to_lowercase());
@@ -940,14 +1131,41 @@ fn read_flatpak_user_updates() -> HashSet<String> {
     .unwrap_or_default()
 }
 
+fn read_flatpak_user_masks() -> HashSet<String> {
+    run_capture("flatpak", &["mask", "--user"])
+        .ok()
+        .filter(|output| output.success)
+        .map(|output| {
+            output
+                .stdout
+                .lines()
+                .map(str::trim)
+                .filter(|id| valid_flatpak_id(id))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn read_flatpak_snapshot() -> FlatpakSnapshot {
-    let apps = read_flatpak_user_list();
+    let (apps, updates, masked) = std::thread::scope(|scope| {
+        let apps = scope.spawn(read_flatpak_user_list);
+        let updates = scope.spawn(read_flatpak_user_updates);
+        let masked = scope.spawn(read_flatpak_user_masks);
+        (
+            apps.join().unwrap_or_default(),
+            updates.join().unwrap_or_default(),
+            masked.join().unwrap_or_default(),
+        )
+    });
     let installed = apps.iter().map(|app| app.app_id.clone()).collect();
-    let updates = read_flatpak_user_updates();
+    let items = installed_items(&apps, &updates, &masked);
     FlatpakSnapshot {
         installed,
         updates,
+        masked,
         apps,
+        items,
     }
 }
 
@@ -1021,12 +1239,41 @@ fn flatpak_icon_data_url(app_id: &str) -> Option<String> {
     None
 }
 
+fn flatpak_icon_data_url_cached(app_id: &str) -> Option<String> {
+    let cache = ICON_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(guard) = cache.lock() {
+        if let Some(hit) = guard.get(app_id) {
+            return hit.clone();
+        }
+    }
+    let value = flatpak_icon_data_url(app_id);
+    if let Ok(mut guard) = cache.lock() {
+        if guard.len() >= 512 {
+            guard.clear();
+        }
+        guard.insert(app_id.to_string(), value.clone());
+    }
+    value
+}
+
+fn invalidate_icon_cache() {
+    if let Ok(mut cache) = ICON_CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock() {
+        cache.clear();
+    }
+}
+
 fn installed_apps(snapshot: &FlatpakSnapshot) -> Vec<AppItem> {
-    snapshot
-        .apps
-        .iter()
+    snapshot.items.clone()
+}
+
+fn installed_items(
+    apps: &[FlatpakInstalled],
+    updates: &HashSet<String>,
+    masked: &HashSet<String>,
+) -> Vec<AppItem> {
+    apps.iter()
         .map(|installed| {
-            let update_available = snapshot.updates.contains(&installed.app_id);
+            let update_available = updates.contains(&installed.app_id);
             AppItem {
                 id: installed.app_id.clone(),
                 provider: "flatpak".to_string(),
@@ -1035,26 +1282,60 @@ fn installed_apps(snapshot: &FlatpakSnapshot) -> Vec<AppItem> {
                 summary: installed.summary.clone(),
                 developer: String::new(),
                 version: installed.version.clone(),
-                icon: flatpak_icon_data_url(&installed.app_id)
+                icon: flatpak_icon_data_url_cached(&installed.app_id)
                     .or_else(|| Some(flatpak_icon_url(&installed.app_id))),
                 installed: true,
                 update_available,
-                pinned: false,
+                pinned: masked.contains(&installed.app_id),
                 channel: None,
                 category: None,
                 monthly_installs: None,
                 hero_image: None,
+                verified: false,
+                license: None,
+                free_license: false,
             }
         })
         .collect()
 }
 
-fn installed_apps_response(
-    providers: [(&str, Result<Vec<AppItem>, String>); 3],
+fn cache_dir() -> Option<PathBuf> {
+    let base = env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
+    Some(base.join("macro-store"))
+}
+
+fn installed_cache_path() -> Option<PathBuf> {
+    cache_dir().map(|dir| dir.join("installed.json"))
+}
+
+fn save_installed_cache(apps: &[AppItem]) {
+    let Some(path) = installed_cache_path() else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    if let Ok(json) = serde_json::to_string(apps) {
+        let _ = fs::write(path, json);
+    }
+}
+
+fn load_installed_cache() -> Vec<AppItem> {
+    installed_cache_path()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|raw| serde_json::from_str::<Vec<AppItem>>(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn installed_apps_response<const N: usize>(
+    providers: [(&str, Result<Vec<AppItem>, String>); N],
 ) -> InstalledAppsResponse {
     let mut response = InstalledAppsResponse {
         apps: Vec::new(),
         provider_errors: Vec::new(),
+        from_cache: false,
     };
     for (provider, result) in providers {
         match result {
@@ -1063,6 +1344,15 @@ fn installed_apps_response(
                 provider: provider.to_string(),
                 message,
             }),
+        }
+    }
+    if response.provider_errors.is_empty() && !response.apps.is_empty() {
+        save_installed_cache(&response.apps);
+    } else if response.apps.is_empty() {
+        let cached = load_installed_cache();
+        if !cached.is_empty() {
+            response.apps = cached;
+            response.from_cache = true;
         }
     }
     response
@@ -1158,11 +1448,98 @@ async fn get_json<T: DeserializeOwned>(url: &str) -> Result<T, String> {
         .map_err(|err| format!("Flathub verisi okunamadı: {err}"))
 }
 
-async fn get_optional<T: DeserializeOwned>(url: &str) -> Option<T> {
-    tokio::time::timeout(Duration::from_secs(5), get_json(url))
+fn cache_read<T: Clone>(
+    cache: &Mutex<HashMap<String, (Instant, T)>>,
+    key: &str,
+    ttl: Duration,
+) -> Option<T> {
+    let guard = cache.lock().ok()?;
+    let (checked_at, value) = guard.get(key)?;
+    if checked_at.elapsed() < ttl {
+        Some(value.clone())
+    } else {
+        None
+    }
+}
+
+fn cache_write<T>(
+    cache: &Mutex<HashMap<String, (Instant, T)>>,
+    key: &str,
+    value: T,
+    ttl: Duration,
+    limit: usize,
+) {
+    let Ok(mut guard) = cache.lock() else {
+        return;
+    };
+    guard.retain(|_, (checked_at, _)| checked_at.elapsed() < ttl);
+    if guard.len() >= limit {
+        if let Some(oldest) = guard
+            .iter()
+            .min_by_key(|(_, (checked_at, _))| *checked_at)
+            .map(|(key, _)| key.clone())
+        {
+            guard.remove(&oldest);
+        }
+    }
+    guard.insert(key.to_string(), (Instant::now(), value));
+}
+
+async fn get_appstream_cached(app_id: &str) -> Result<Appstream, String> {
+    let cache = APPSTREAM_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(appstream) = cache_read(cache, app_id, APPSTREAM_CACHE_TTL) {
+        return Ok(appstream);
+    }
+
+    let url = format!("{FLATHUB_API}/appstream/{app_id}");
+    let appstream = get_json::<Appstream>(&url).await?;
+
+    cache_write(
+        cache,
+        app_id,
+        appstream.clone(),
+        APPSTREAM_CACHE_TTL,
+        APPSTREAM_CACHE_LIMIT,
+    );
+
+    Ok(appstream)
+}
+
+fn invalidate_appstream_cache() {
+    if let Ok(mut cache) = APPSTREAM_CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+    {
+        cache.clear();
+    }
+}
+
+async fn get_cached_json<T: DeserializeOwned>(url: &str) -> Result<T, String> {
+    let cache = JSON_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(value) = cache_read(cache, url, JSON_CACHE_TTL) {
+        if let Ok(parsed) = serde_json::from_value(value) {
+            return Ok(parsed);
+        }
+    }
+
+    let value = get_json::<Value>(url).await?;
+
+    cache_write(cache, url, value.clone(), JSON_CACHE_TTL, JSON_CACHE_LIMIT);
+
+    serde_json::from_value(value).map_err(|err| format!("Flathub verisi çözümlenemedi: {err}"))
+}
+
+async fn get_optional_cached<T: DeserializeOwned>(url: &str) -> Option<T> {
+    tokio::time::timeout(Duration::from_secs(5), get_cached_json(url))
         .await
         .ok()?
         .ok()
+}
+
+fn invalidate_json_cache() {
+    if let Ok(mut cache) = JSON_CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock() {
+        cache.clear();
+    }
 }
 
 fn safe_icon(value: Option<String>, app_id: &str) -> Option<String> {
@@ -1204,6 +1581,9 @@ fn app_from_api(
         category,
         monthly_installs: app.installs_last_month,
         hero_image: None,
+        verified: app.verification_verified.unwrap_or(false),
+        license: app.project_license,
+        free_license: app.is_free_license.unwrap_or(false),
         id,
         provider: "flatpak".to_string(),
         package_type: None,
@@ -1227,6 +1607,9 @@ fn app_from_snap(item: snap::ProviderApp) -> AppItem {
         category: item.category,
         monthly_installs: None,
         hero_image: item.hero_image,
+        verified: false,
+        license: None,
+        free_license: false,
     }
 }
 
@@ -1247,6 +1630,9 @@ fn app_from_brew(item: brew::ProviderApp) -> AppItem {
         category: item.category,
         monthly_installs: None,
         hero_image: None,
+        verified: false,
+        license: None,
+        free_license: false,
     }
 }
 
@@ -1268,6 +1654,9 @@ fn fallback_app(id: &str, installed: &HashSet<String>, updates: &HashSet<String>
         category: None,
         monthly_installs: None,
         hero_image: None,
+        verified: false,
+        license: None,
+        free_license: false,
     }
 }
 
@@ -1335,13 +1724,34 @@ fn verified(appstream: &Appstream) -> bool {
         .unwrap_or(false)
 }
 
+fn release_items(releases: &[ApiRelease]) -> Vec<ReleaseItem> {
+    releases
+        .iter()
+        .filter_map(|release| {
+            let version = release.version.as_deref()?.trim();
+            if version.is_empty() {
+                return None;
+            }
+            Some(ReleaseItem {
+                version: version.to_string(),
+                date: release.timestamp.as_ref().and_then(|value| {
+                    value
+                        .as_str()
+                        .and_then(|text| text.parse::<i64>().ok())
+                        .or_else(|| value.as_i64())
+                }),
+            })
+        })
+        .take(8)
+        .collect()
+}
+
 async fn fetch_appstream_item(
     id: String,
     installed: &HashSet<String>,
     updates: &HashSet<String>,
 ) -> AppItem {
-    let url = format!("{FLATHUB_API}/appstream/{id}");
-    match get_json::<Appstream>(&url).await {
+    match get_appstream_cached(&id).await {
         Ok(appstream) => {
             let version = appstream
                 .releases
@@ -1355,6 +1765,8 @@ async fn fetch_appstream_item(
                 .map(|item| item.url.clone());
             let category = main_category_from_appstream(&appstream.categories);
             let update_available = is_installed && updates.contains(&id);
+            let verified = verified(&appstream);
+            let license = Some(appstream.project_license.clone()).filter(|value| !value.is_empty());
             AppItem {
                 id,
                 provider: "flatpak".to_string(),
@@ -1382,6 +1794,9 @@ async fn fetch_appstream_item(
                 category,
                 monthly_installs: None,
                 hero_image,
+                verified,
+                license,
+                free_license: false,
             }
         }
         Err(_) => fallback_app(&id, installed, updates),
@@ -1463,6 +1878,9 @@ fn flatpak_search_fallback(
             category: None,
             monthly_installs: None,
             hero_image: None,
+            verified: false,
+            license: None,
+            free_license: false,
         });
         if apps.len() >= SEARCH_LIMIT {
             break;
@@ -1663,6 +2081,7 @@ async fn get_store_info() -> Result<StoreInfo, String> {
             user_flathub_available,
             snap_available: snap::available(),
             brew_available: brew::available(),
+            appimage_count: appimage::count(),
         }
     })
     .await
@@ -1678,8 +2097,8 @@ async fn get_discover(date: String) -> Result<DiscoverData, String> {
     let day_url = format!("{FLATHUB_API}/app-picks/app-of-the-day/{date}");
     let week_url = format!("{FLATHUB_API}/app-picks/apps-of-the-week/{date}");
     let (day, week) = tokio::join!(
-        get_optional::<ApiAppOfDay>(&day_url),
-        get_optional::<ApiPicks>(&week_url),
+        get_optional_cached::<ApiAppOfDay>(&day_url),
+        get_optional_cached::<ApiPicks>(&week_url),
     );
 
     let day_id = day
@@ -1855,6 +2274,7 @@ async fn get_category(slug: String, page: Option<u32>) -> Result<CategoryPage, S
 async fn get_app_detail(app_id: String, provider: String) -> Result<AppDetail, String> {
     match provider.as_str() {
         "flatpak" => get_flatpak_app_detail(app_id).await,
+        "appimage" => appimage::detail(&app_id),
         "snap" => {
             let detail = snap::detail(&app_id).await?;
             let app = app_from_snap(detail.app);
@@ -1876,6 +2296,7 @@ async fn get_app_detail(app_id: String, provider: String) -> Result<AppDetail, S
                 installs_last_month: None,
                 rating: None,
                 reviews: Vec::new(),
+                releases: Vec::new(),
             })
         }
         "brew" => {
@@ -1895,10 +2316,54 @@ async fn get_app_detail(app_id: String, provider: String) -> Result<AppDetail, S
                 installs_last_month: None,
                 rating: None,
                 reviews: Vec::new(),
+                releases: Vec::new(),
             })
         }
         _ => Err("Paket sağlayıcısı geçersiz.".to_string()),
     }
+}
+
+#[tauri::command]
+async fn get_app_permissions(app_id: String) -> Result<AppPermissions, String> {
+    if !valid_flatpak_id(&app_id) {
+        return Err("Uygulama kimliği geçersiz.".to_string());
+    }
+    let flatpak_available = tokio::task::spawn_blocking(flatpak_available)
+        .await
+        .map_err(|err| format!("Flatpak durumu arka planda okunamadı: {err}"))?;
+    if !flatpak_available {
+        return Ok(AppPermissions {
+            installed: false,
+            available: false,
+            raw: String::new(),
+        });
+    }
+    if !flatpak_snapshot_async().await?.installed.contains(&app_id) {
+        return Ok(AppPermissions {
+            installed: false,
+            available: true,
+            raw: String::new(),
+        });
+    }
+
+    let id = app_id.clone();
+    let output = tokio::task::spawn_blocking(move || {
+        run_capture(
+            "flatpak",
+            &["info", "--user", "--show-permissions", id.as_str()],
+        )
+    })
+    .await
+    .map_err(|err| format!("Flatpak izinleri arka planda okunamadı: {err}"))??;
+    if !output.success {
+        return Err(failure_message("flatpak info", &output));
+    }
+
+    Ok(AppPermissions {
+        installed: true,
+        available: true,
+        raw: truncate_chars(output.stdout.trim(), 12000),
+    })
 }
 
 async fn get_flatpak_app_detail(app_id: String) -> Result<AppDetail, String> {
@@ -1907,18 +2372,17 @@ async fn get_flatpak_app_detail(app_id: String) -> Result<AppDetail, String> {
     }
     let snapshot = flatpak_snapshot_async().await?;
     let encoded = app_id.clone();
-    let appstream_url = format!("{FLATHUB_API}/appstream/{encoded}");
     let summary_url = format!("{FLATHUB_API}/summary/{encoded}");
     let stats_url = format!("{FLATHUB_API}/stats/{encoded}");
     let ratings_url = format!("{ODRS_API}/ratings/{encoded}");
     let reviews_url = format!("{ODRS_API}/app/{encoded}");
 
     let (appstream, summary, stats, ratings, reviews) = tokio::join!(
-        get_json::<Appstream>(&appstream_url),
-        get_optional::<ApiSummary>(&summary_url),
-        get_optional::<ApiStats>(&stats_url),
-        get_optional::<OdrRatings>(&ratings_url),
-        get_optional::<Vec<OdrReview>>(&reviews_url),
+        get_appstream_cached(&app_id),
+        get_optional_cached::<ApiSummary>(&summary_url),
+        get_optional_cached::<ApiStats>(&stats_url),
+        get_optional_cached::<OdrRatings>(&ratings_url),
+        get_optional_cached::<Vec<OdrReview>>(&reviews_url),
     );
 
     let appstream = appstream.map_err(|_| {
@@ -1935,6 +2399,7 @@ async fn get_flatpak_app_detail(app_id: String) -> Result<AppDetail, String> {
         .first()
         .and_then(|release| release.version.clone())
         .unwrap_or_default();
+    let releases = release_items(&appstream.releases);
     let is_installed = snapshot.installed.contains(&app_id);
     let monthly_installs = stats.and_then(|value| value.installs_last_month);
     let app = AppItem {
@@ -1960,11 +2425,14 @@ async fn get_flatpak_app_detail(app_id: String) -> Result<AppDetail, String> {
         icon: safe_icon(appstream.icon.clone(), &app_id),
         installed: is_installed,
         update_available: is_installed && snapshot.updates.contains(&app_id),
-        pinned: false,
+        pinned: is_installed && snapshot.masked.contains(&app_id),
         channel: None,
         category: main_category_from_appstream(&appstream.categories),
         monthly_installs,
         hero_image: screenshots.first().map(|item| item.url.clone()),
+        verified: verified(&appstream),
+        license: Some(appstream.project_license.clone()).filter(|value| !value.is_empty()),
+        free_license: false,
     };
 
     let rating = ratings.and_then(|value| {
@@ -2054,6 +2522,7 @@ async fn get_flatpak_app_detail(app_id: String) -> Result<AppDetail, String> {
         installs_last_month: monthly_installs,
         rating,
         reviews: review_items,
+        releases,
     })
 }
 
@@ -2094,12 +2563,216 @@ async fn list_installed_apps() -> InstalledAppsResponse {
     let brew = brew
         .map_err(|error| format!("Homebrew envanteri okunamadı: {error}"))
         .and_then(|result| result);
-    installed_apps_response([("flatpak", flatpak), ("snap", snap), ("brew", brew)])
+    installed_apps_response([
+        ("flatpak", flatpak),
+        ("snap", snap),
+        ("brew", brew),
+        ("appimage", Ok(appimage::installed())),
+    ])
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LibraryUsage {
+    total_bytes: u64,
+    apps: usize,
+}
+
+#[tauri::command]
+async fn library_usage() -> Result<LibraryUsage, String> {
+    tokio::task::spawn_blocking(|| {
+        let snapshot = flatpak_snapshot();
+        LibraryUsage {
+            total_bytes: snapshot
+                .apps
+                .iter()
+                .filter_map(|app| app.installed_size)
+                .sum(),
+            apps: snapshot.apps.len(),
+        }
+    })
+    .await
+    .map_err(|error| format!("Kitaplık boyutu okunamadı: {error}"))
+}
+
+#[tauri::command]
+async fn prune_unused_runtimes(app: AppHandle) -> Result<OperationOutcome, String> {
+    if SETTING_UP.load(Ordering::SeqCst) {
+        return Err(
+            "Sistem hazırlığı sürüyor. Lütfen tamamlandıktan sonra yeniden deneyin.".to_string(),
+        );
+    }
+    if OPERATING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("Zaten devam eden bir işlem var.".to_string());
+    }
+    let _lock = OperationLock;
+    let output = tokio::task::spawn_blocking(|| {
+        run_capture(
+            "flatpak",
+            &["uninstall", "--user", "--unused", "--noninteractive"],
+        )
+    })
+    .await
+    .map_err(|error| format!("Temizlik arka planda tamamlanamadı: {error}"))??;
+
+    let message = if output.success {
+        "Kullanılmayan çalışma zamanları temizlendi.".to_string()
+    } else {
+        failure_message("flatpak uninstall", &output)
+    };
+    emit_log(
+        &app,
+        if output.success {
+            format!("✓ {message}")
+        } else {
+            format!("✕ {message}")
+        },
+        if output.success { "info" } else { "error" },
+    );
+    if output.success {
+        invalidate_flatpak_cache();
+    }
+    let outcome = OperationOutcome {
+        success: output.success,
+        code: None,
+        message,
+        app_id: String::new(),
+        action: "prune".to_string(),
+        manager: "Flatpak".to_string(),
+    };
+    let _ = app.emit("app-finished", outcome.clone());
+    Ok(outcome)
+}
+
+#[tauri::command]
+async fn set_app_mask(
+    app: AppHandle,
+    id: String,
+    masked: bool,
+) -> Result<OperationOutcome, String> {
+    if !valid_flatpak_id(&id) {
+        return Err("Uygulama kimliği geçersiz.".to_string());
+    }
+    if OPERATING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("Zaten devam eden bir işlem var.".to_string());
+    }
+    let _lock = OperationLock;
+    let masked_id = id.clone();
+    let output = tokio::task::spawn_blocking(move || {
+        let args: Vec<&str> = if masked {
+            vec!["mask", "--user", &masked_id]
+        } else {
+            vec!["mask", "--user", "--remove", &masked_id]
+        };
+        run_capture("flatpak", &args)
+    })
+    .await
+    .map_err(|error| format!("Maskeleme arka planda tamamlanamadı: {error}"))??;
+
+    let message = if output.success {
+        if masked {
+            format!("{id} için güncellemeler durduruldu.")
+        } else {
+            format!("{id} için güncellemeler yeniden etkinleştirildi.")
+        }
+    } else {
+        failure_message("flatpak mask", &output)
+    };
+    emit_log(
+        &app,
+        if output.success {
+            format!("✓ {message}")
+        } else {
+            format!("✕ {message}")
+        },
+        if output.success { "info" } else { "error" },
+    );
+    if output.success {
+        invalidate_flatpak_cache();
+    }
+    let outcome = OperationOutcome {
+        success: output.success,
+        code: None,
+        message,
+        app_id: id,
+        action: if masked { "mask" } else { "unmask" }.to_string(),
+        manager: "Flatpak".to_string(),
+    };
+    let _ = app.emit("app-finished", outcome.clone());
+    Ok(outcome)
+}
+
+#[tauri::command]
+async fn list_brew_taps() -> Result<Vec<String>, String> {
+    tokio::task::spawn_blocking(brew::taps)
+        .await
+        .map_err(|error| format!("Homebrew tap listesi arka planda okunamadı: {error}"))?
+}
+
+#[tauri::command]
+async fn add_brew_tap(name: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || brew::add_tap(&name))
+        .await
+        .map_err(|error| format!("Homebrew tap işlemi arka planda tamamlanamadı: {error}"))?
+}
+
+#[tauri::command]
+async fn remove_brew_tap(name: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || brew::remove_tap(&name))
+        .await
+        .map_err(|error| format!("Homebrew tap işlemi arka planda tamamlanamadı: {error}"))?
+}
+
+#[tauri::command]
+async fn switch_snap_channel(
+    app: AppHandle,
+    id: String,
+    channel: String,
+) -> Result<OperationOutcome, String> {
+    if SETTING_UP.load(Ordering::SeqCst) {
+        return Err(
+            "Sistem hazırlığı sürüyor. Lütfen tamamlandıktan sonra yeniden deneyin.".to_string(),
+        );
+    }
+    if OPERATING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("Zaten devam eden bir işlem var.".to_string());
+    }
+    let _lock = OperationLock;
+    let message = match snap::switch_channel(&id, &channel).await {
+        Ok(message) => message,
+        Err(error) => {
+            emit_log(&app, format!("✕ {error}"), "error");
+            return Err(error);
+        }
+    };
+    emit_log(&app, format!("✓ {message}"), "info");
+    let outcome = OperationOutcome {
+        success: true,
+        code: None,
+        message,
+        app_id: id,
+        action: "channel".to_string(),
+        manager: "Snap".to_string(),
+    };
+    let _ = app.emit("app-finished", outcome.clone());
+    Ok(outcome)
 }
 
 #[tauri::command]
 fn refresh_provider_caches() {
     invalidate_flatpak_cache();
+    invalidate_appstream_cache();
+    invalidate_json_cache();
+    invalidate_icon_cache();
     snap::invalidate_cache();
     brew::invalidate_cache();
 }
@@ -2375,8 +3048,77 @@ async fn run_app_action(
     match provider.as_str() {
         "flatpak" => run_flatpak_action(app, id, action).await,
         "snap" | "brew" => run_provider_action(app, id, provider, action).await,
+        "appimage" => run_appimage_action(app, id, action).await,
         _ => Err("Paket sağlayıcısı geçersiz.".to_string()),
     }
+}
+
+async fn run_appimage_action(
+    app: AppHandle,
+    id: String,
+    action: ActionKind,
+) -> Result<OperationOutcome, String> {
+    match action {
+        ActionKind::Remove => {
+            if SETTING_UP.load(Ordering::SeqCst) {
+                return Err(
+                    "Sistem hazırlığı sürüyor. Lütfen tamamlandıktan sonra yeniden deneyin."
+                        .to_string(),
+                );
+            }
+            if OPERATING
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+            {
+                return Err("Zaten devam eden bir işlem var.".to_string());
+            }
+            let _lock = OperationLock;
+            let message = appimage::remove(&id)?;
+            emit_log(&app, format!("✓ {message}"), "info");
+            let outcome = OperationOutcome {
+                success: true,
+                code: None,
+                message,
+                app_id: id,
+                action: action.as_str().to_string(),
+                manager: "AppImage".to_string(),
+            };
+            let _ = app.emit("app-finished", outcome.clone());
+            Ok(outcome)
+        }
+        ActionKind::Install => Err(
+            "AppImage kurulumu için “AppImage içe aktar” akışını kullanın.".to_string(),
+        ),
+        ActionKind::Update => Err(
+            "AppImage dosyaları kendi güncelleme yöntemleriyle yenilenir; mağaza üzerinden güncellenemez."
+                .to_string(),
+        ),
+    }
+}
+
+#[tauri::command]
+fn list_appimages() -> Result<Vec<AppItem>, String> {
+    Ok(appimage::installed())
+}
+
+#[tauri::command]
+fn pick_appimage_file() -> Result<Option<String>, String> {
+    appimage::pick()
+}
+
+#[tauri::command]
+fn import_appimage_file(path: String, name: Option<String>) -> Result<AppItem, String> {
+    appimage::import(&path, name)
+}
+
+#[tauri::command]
+fn remove_appimage_file(id: String) -> Result<String, String> {
+    appimage::remove(&id)
+}
+
+#[tauri::command]
+fn launch_appimage_file(id: String) -> Result<(), String> {
+    appimage::launch(&id)
 }
 
 async fn run_flatpak_action(
@@ -2596,6 +3338,126 @@ async fn remove_app(
     run_app_action(app, id, provider, ActionKind::Remove).await
 }
 
+fn flatpak_remote_names() -> Vec<String> {
+    run_capture("flatpak", &["remotes", "--user", "--columns=name"])
+        .ok()
+        .filter(|output| output.success)
+        .map(|output| {
+            output
+                .stdout
+                .lines()
+                .map(str::trim)
+                .filter(|name| !name.is_empty() && name.len() <= 64)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn read_flatpak_commits(app_id: &str) -> Result<Vec<FlatpakCommit>, String> {
+    if !flatpak_available() {
+        return Ok(Vec::new());
+    }
+    let mut remotes = flatpak_remote_names();
+    if !remotes.iter().any(|name| name == "flathub") {
+        remotes.insert(0, "flathub".to_string());
+    }
+    for remote in remotes {
+        let Ok(output) = run_capture("flatpak", &["remote-info", "--log", &remote, app_id]) else {
+            continue;
+        };
+        if !output.success {
+            continue;
+        }
+        let commits = parse_remote_info_log(&output.stdout);
+        if !commits.is_empty() {
+            return Ok(commits);
+        }
+    }
+    Ok(Vec::new())
+}
+
+#[tauri::command]
+async fn flatpak_commits(app_id: String) -> Result<Vec<FlatpakCommit>, String> {
+    if !valid_flatpak_id(&app_id) {
+        return Err("Uygulama kimliği geçersiz.".to_string());
+    }
+    tokio::task::spawn_blocking(move || read_flatpak_commits(&app_id))
+        .await
+        .map_err(|error| format!("Sürüm geçmişi arka planda okunamadı: {error}"))?
+}
+
+#[tauri::command]
+async fn rollback_flatpak_app(
+    app: AppHandle,
+    id: String,
+    commit: String,
+) -> Result<OperationOutcome, String> {
+    if !valid_flatpak_id(&id) {
+        return Err("Uygulama kimliği geçersiz.".to_string());
+    }
+    if !valid_commit_hash(&commit) {
+        return Err("Sürüm kimliği geçersiz.".to_string());
+    }
+    if SETTING_UP.load(Ordering::SeqCst) {
+        return Err(
+            "Sistem hazırlığı sürüyor. Lütfen tamamlandıktan sonra yeniden deneyin.".to_string(),
+        );
+    }
+    if OPERATING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("Zaten devam eden bir işlem var.".to_string());
+    }
+    let _lock = OperationLock;
+
+    if !flatpak_snapshot_async().await?.installed.contains(&id) {
+        return Err("Bu Flatpak uygulaması kullanıcı kurulumunda yüklü değil.".to_string());
+    }
+
+    let target = id.clone();
+    let flag = format!("--commit={commit}");
+    let display = format!("flatpak update --user {flag} {target}");
+    emit_log(&app, format!("Komut: {display}"), "cmd");
+    let output = tokio::task::spawn_blocking(move || {
+        run_capture(
+            "flatpak",
+            &["update", "--user", "--noninteractive", &flag, &target],
+        )
+    })
+    .await
+    .map_err(|error| format!("Sürüm geri alma arka planda tamamlanamadı: {error}"))??;
+
+    let message = if output.success {
+        format!("{id} seçilen sürüme sabitlendi.")
+    } else {
+        failure_message("flatpak update", &output)
+    };
+    emit_log(
+        &app,
+        if output.success {
+            format!("✓ {message}")
+        } else {
+            format!("✕ {message}")
+        },
+        if output.success { "info" } else { "error" },
+    );
+    if output.success {
+        invalidate_flatpak_cache();
+    }
+    let outcome = OperationOutcome {
+        success: output.success,
+        code: None,
+        message,
+        app_id: id,
+        action: "rollback".to_string(),
+        manager: "Flatpak".to_string(),
+    };
+    let _ = app.emit("app-finished", outcome.clone());
+    Ok(outcome)
+}
+
 #[tauri::command]
 async fn update_app(
     app: AppHandle,
@@ -2605,9 +3467,175 @@ async fn update_app(
     run_app_action(app, id, provider, ActionKind::Update).await
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct DeepLinkTarget {
+    kind: String,
+    id: Option<String>,
+    provider: Option<String>,
+    query: Option<String>,
+}
+
+static PENDING_DEEP_LINK: Mutex<Option<DeepLinkTarget>> = Mutex::new(None);
+
+fn valid_app_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && !value.starts_with('-')
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'+' | b'-' | b'@')
+        })
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).unwrap_or("");
+            if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                out.push(byte);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(if bytes[index] == b'+' {
+            b' '
+        } else {
+            bytes[index]
+        });
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
+fn query_param(query: &str, key: &str) -> Option<String> {
+    query.split('&').find_map(|pair| {
+        let (name, value) = pair.split_once('=')?;
+        if name.eq_ignore_ascii_case(key) {
+            Some(percent_decode(value))
+        } else {
+            None
+        }
+    })
+}
+
+fn parse_deep_link(raw: &str) -> Option<DeepLinkTarget> {
+    let trimmed = raw.trim();
+    let rest = trimmed
+        .strip_prefix("macro-store://")
+        .or_else(|| trimmed.strip_prefix("MACRO-STORE://"))
+        .or_else(|| trimmed.strip_prefix("Macro-Store://"))?;
+
+    let (path, query) = match rest.split_once('?') {
+        Some((path, query)) => (path, query),
+        None => (rest, ""),
+    };
+    let mut segments = path.split('/').filter(|segment| !segment.is_empty());
+    let head = segments.next()?;
+
+    match head {
+        "app" => {
+            let id = percent_decode(segments.next()?);
+            if !valid_app_token(&id) {
+                return None;
+            }
+            let provider = query_param(query, "provider")
+                .map(|value| value.to_ascii_lowercase())
+                .filter(|value| matches!(value.as_str(), "flatpak" | "snap" | "brew"));
+            Some(DeepLinkTarget {
+                kind: "app".to_string(),
+                id: Some(id),
+                provider,
+                query: None,
+            })
+        }
+        "search" => {
+            let raw_query = segments.next().map(percent_decode);
+            let query = query_param(query, "q")
+                .or(raw_query)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            if query.is_empty() || query.len() > 128 {
+                return None;
+            }
+            Some(DeepLinkTarget {
+                kind: "search".to_string(),
+                id: None,
+                provider: None,
+                query: Some(query),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn dispatch_deep_link(app: &AppHandle, raw: &str) {
+    let Some(target) = parse_deep_link(raw) else {
+        return;
+    };
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+    let _ = app.emit("deep-link-open", target);
+}
+
+fn setup_deep_links(app: &AppHandle) {
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    {
+        let _ = app.deep_link().register_all();
+    }
+
+    if let Ok(Some(urls)) = app.deep_link().get_current() {
+        for url in urls {
+            if let Some(target) = parse_deep_link(url.as_str()) {
+                if let Ok(mut pending) = PENDING_DEEP_LINK.lock() {
+                    *pending = Some(target);
+                }
+                break;
+            }
+        }
+    }
+
+    let handle = app.clone();
+    app.deep_link().on_open_url(move |event| {
+        for url in event.urls() {
+            if parse_deep_link(url.as_str()).is_some() {
+                dispatch_deep_link(&handle, url.as_str());
+                return;
+            }
+        }
+    });
+}
+
+#[tauri::command]
+fn take_pending_deep_link() -> Option<DeepLinkTarget> {
+    PENDING_DEEP_LINK
+        .lock()
+        .ok()
+        .and_then(|mut pending| pending.take())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
+        .plugin(tauri_plugin_deep_link::init())
+        .setup(|app| {
+            tray::setup(app.handle())?;
+            setup_deep_links(app.handle());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_setup_status,
             install_flatpak,
@@ -2616,14 +3644,31 @@ pub fn run() {
             search_apps,
             get_category,
             get_app_detail,
+            get_app_permissions,
             list_installed_apps,
+            library_usage,
+            prune_unused_runtimes,
+            switch_snap_channel,
+            set_app_mask,
+            list_brew_taps,
+            add_brew_tap,
+            remove_brew_tap,
             refresh_provider_caches,
             list_flatpak_remotes,
             add_flatpak_remote,
             remove_flatpak_remote,
+            list_appimages,
+            pick_appimage_file,
+            import_appimage_file,
+            remove_appimage_file,
+            launch_appimage_file,
             install_app,
             remove_app,
-            update_app
+            update_app,
+            flatpak_commits,
+            rollback_flatpak_app,
+            take_pending_deep_link,
+            tray::set_tray_updates
         ])
         .run(tauri::generate_context!())
         .expect("Macro Store başlatılamadı");
@@ -2644,6 +3689,174 @@ mod tests {
         assert_eq!(apps[1].summary, "Editor for notes");
         assert_eq!(apps[1].version, "2.4");
     }
+
+    #[test]
+    fn deep_links_parse_app_and_search_targets() {
+        let app = parse_deep_link("macro-store://app/org.gimp.GIMP").expect("app link");
+        assert_eq!(app.kind, "app");
+        assert_eq!(app.id.as_deref(), Some("org.gimp.GIMP"));
+        assert_eq!(app.provider, None);
+
+        let snap = parse_deep_link("macro-store://app/firefox?provider=snaP").expect("snap link");
+        assert_eq!(snap.provider.as_deref(), Some("snap"));
+
+        let search = parse_deep_link("macro-store://search?q=video%20editor").expect("search");
+        assert_eq!(search.kind, "search");
+        assert_eq!(search.query.as_deref(), Some("video editor"));
+
+        assert!(parse_deep_link("macro-store://app/-bad").is_none());
+        assert!(parse_deep_link("macro-store://nope/x").is_none());
+        assert!(parse_deep_link("https://example.com/app/x").is_none());
+        assert!(parse_deep_link("macro-store://search?q=").is_none());
+    }
+
+    #[test]
+    fn remote_info_log_parses_commits() {
+        let log = "commit: 3f8f1a9d2b4c5e6f70819a2b3c4d5e6f70819a2b\nParent: 1111\nSubject: Update to 2.10.0\nDate: 2024-03-05 10:12:33 +0000\n\ncommit: 7c2b9e0f1a3d5b7c9e1f2a4b6c8d0e2f4a6b8c0d\nSubject: Fix crash on start\nDate: 2024-02-01 00:00:00 +0300\n";
+        let commits = parse_remote_info_log(log);
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].subject, "Update to 2.10.0");
+        assert_eq!(commits[0].date, Some(1_709_633_553));
+        assert_eq!(commits[1].date, Some(1_706_734_800));
+        assert!(commits[0].commit.starts_with("3f8f1a9d"));
+    }
+
+    #[test]
+    fn remote_info_log_skips_invalid_commits() {
+        let log = "commit: not-hex\nSubject: nope\n\ncommit: 0123456\nSubject: Short hash ok\n";
+        let commits = parse_remote_info_log(log);
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].commit, "0123456");
+        assert_eq!(commits[0].date, None);
+        assert!(!valid_commit_hash("xyz1234"));
+        assert!(!valid_commit_hash("abc"));
+        assert!(valid_commit_hash("abcdef1"));
+    }
+
+    #[test]
+    fn cache_invalidation_clears_entries() {
+        let json = JSON_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        json.lock().expect("json cache lock").insert(
+            "https://example.test".to_string(),
+            (Instant::now(), Value::Null),
+        );
+        invalidate_json_cache();
+        assert!(json.lock().expect("json cache lock").is_empty());
+
+        let icons = ICON_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        icons.lock().expect("icon cache lock").insert(
+            "org.example.Alpha".to_string(),
+            Some("data:image/png;base64,".to_string()),
+        );
+        invalidate_icon_cache();
+        assert!(icons.lock().expect("icon cache lock").is_empty());
+    }
+
+    #[test]
+    fn cache_read_respects_ttl() {
+        let cache: Mutex<HashMap<String, (Instant, u32)>> = Mutex::new(HashMap::new());
+        let ttl = Duration::from_secs(60);
+
+        cache_write(&cache, "fresh", 7, ttl, 4);
+        assert_eq!(cache_read(&cache, "fresh", ttl), Some(7));
+
+        let stale = Instant::now()
+            .checked_sub(Duration::from_secs(120))
+            .expect("stale instant");
+        cache
+            .lock()
+            .expect("cache lock")
+            .insert("stale".to_string(), (stale, 9));
+
+        assert_eq!(cache_read(&cache, "stale", ttl), None);
+        assert_eq!(cache_read(&cache, "missing", ttl), None);
+    }
+
+    #[test]
+    fn cache_write_prunes_expired_and_evicts_oldest() {
+        let cache: Mutex<HashMap<String, (Instant, u32)>> = Mutex::new(HashMap::new());
+        let ttl = Duration::from_secs(60);
+        let limit = 2;
+        let expired = Instant::now()
+            .checked_sub(Duration::from_secs(120))
+            .expect("expired instant");
+        let older = Instant::now()
+            .checked_sub(Duration::from_secs(10))
+            .expect("older instant");
+        let newer = Instant::now()
+            .checked_sub(Duration::from_secs(5))
+            .expect("newer instant");
+
+        {
+            let mut guard = cache.lock().expect("cache lock");
+            guard.insert("expired".to_string(), (expired, 0));
+            guard.insert("older".to_string(), (older, 1));
+            guard.insert("newer".to_string(), (newer, 2));
+        }
+
+        cache_write(&cache, "fresh", 3, ttl, limit);
+
+        let guard = cache.lock().expect("cache lock");
+        assert_eq!(guard.len(), limit);
+        assert!(!guard.contains_key("expired"));
+        assert!(!guard.contains_key("older"));
+        assert!(guard.contains_key("newer"));
+        assert!(guard.contains_key("fresh"));
+    }
+
+    #[test]
+    fn flatpak_sizes_parse_units_and_locale_separators() {
+        assert_eq!(parse_flatpak_size("1.2 MB"), Some(1_258_291));
+        assert_eq!(parse_flatpak_size("1,2 MB"), Some(1_258_291));
+        assert_eq!(parse_flatpak_size("512 kB"), Some(524_288));
+        assert_eq!(parse_flatpak_size("2 GB"), Some(2_147_483_648));
+        assert_eq!(parse_flatpak_size("0 bytes"), Some(0));
+        assert_eq!(parse_flatpak_size(""), None);
+        assert_eq!(parse_flatpak_size("bilinmiyor"), None);
+        assert_eq!(parse_flatpak_size("-1 MB"), None);
+    }
+
+    #[test]
+    fn installed_rows_carry_sizes_and_default_to_none() {
+        let apps = parse_flatpak_user_list(
+            "Application	Name	Description	Version	Size
+org.example.Alpha	Alpha		1.0	1.2 MB
+org.example.Beta	Beta		2.0	
+",
+        );
+        assert_eq!(apps.len(), 2);
+        assert_eq!(apps[0].installed_size, Some(1_258_291));
+        assert_eq!(apps[1].installed_size, None);
+    }
+
+    #[test]
+    fn release_items_skip_empty_versions_and_parse_dates() {
+        let releases = vec![
+            ApiRelease {
+                version: Some("1.2".to_string()),
+                timestamp: Some(Value::String("1700000000".to_string())),
+            },
+            ApiRelease {
+                version: Some("   ".to_string()),
+                timestamp: None,
+            },
+            ApiRelease {
+                version: None,
+                timestamp: None,
+            },
+            ApiRelease {
+                version: Some("1.0".to_string()),
+                timestamp: Some(Value::from(1600000000)),
+            },
+        ];
+        let items = release_items(&releases);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].version, "1.2");
+        assert_eq!(items[0].date, Some(1_700_000_000));
+        assert_eq!(items[1].version, "1.0");
+        assert_eq!(items[1].date, Some(1_600_000_000));
+    }
+
     #[test]
     fn flatpak_ids_reject_options_and_paths() {
         for id in [
@@ -2765,6 +3978,9 @@ mod tests {
             category: None,
             monthly_installs: None,
             hero_image: None,
+            verified: false,
+            license: None,
+            free_license: false,
         };
         let response = installed_apps_response([
             ("flatpak", Ok(vec![app("flatpak", "org.example.App")])),
@@ -2802,6 +4018,9 @@ mod tests {
             category: None,
             monthly_installs: None,
             hero_image: None,
+            verified: false,
+            license: None,
+            free_license: false,
         };
         let response = search_apps_response([
             ("Flatpak", Err("Flathub timeout".to_string())),
