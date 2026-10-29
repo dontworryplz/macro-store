@@ -804,7 +804,9 @@ function metaParts(app) {
   const parts = [providerManagerLabel(app)];
   if (app.developer) parts.push(app.developer);
   if (app.category) parts.push(categoryName(app.category));
-  if (app.installed && app.version) parts.push(`v${app.version}`);
+  if (app.installed && app.version) {
+    parts.push(/^\d/.test(app.version) ? `v${app.version}` : app.version);
+  }
   if (app.channel) parts.push(`Snap ${app.channel}`);
   if (app.monthlyInstalls) parts.push(`${formatCount(app.monthlyInstalls)} aylık kurulum`);
   return parts;
@@ -3179,10 +3181,10 @@ function renderSettings() {
   const theme = currentTheme();
   const accent = currentAccent();
   const lowPower = lowPowerEnabled();
-  const appimageCount = Math.max(
-    state.installed.filter(app => appProvider(app) === "appimage").length,
-    Number(state.storeInfo?.appimageCount) || 0,
-  );
+  const installedAppimageCount = state.installed.filter(app => appProvider(app) === "appimage").length;
+  const appimageCount = state.installedLoaded
+    ? installedAppimageCount
+    : Math.max(installedAppimageCount, Number(state.storeInfo?.appimageCount) || 0);
   let repoBody;
 
   if (state.remotesLoading && !state.remotes.length) {
