@@ -49,5 +49,6 @@ Icon=macro-store
 Name=Macro Store
 Terminal=false
 Type=Application
+MimeType=x-scheme-handler/macro-store
 EOF
 }
