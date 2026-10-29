@@ -236,8 +236,11 @@ sha256sum -c SHA256SUMS
 
 ## Derin bağlantılar
 
-Mağaza `macro-store://` şemasını kaydeder (Linux paketlerinde `.desktop` dosyası,
-Windows'ta kayıt defteri, macOS'ta URL şeması):
+Mağaza `macro-store://` şemasını kaydeder. Linux ve Windows'ta şema ilk
+çalıştırmada kullanıcı kapsamında kaydedilir (`.desktop` dosyası / kayıt
+defteri); macOS'ta kayıt uygulama paketindeki `Info.plist` ile yapılır. Bu
+yüzden macOS'ta bağlantılar `tauri dev` yerine `tauri build` çıktısıyla
+denenmelidir.
 
 ```bash
 macro-store://app/org.mozilla.firefox
