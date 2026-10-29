@@ -1,8 +1,9 @@
 [package]
 name = "mss"
-version = "0.3.0"
-description = "Macro Store — Flathub tabanlı Linux yazılım mağazası"
+version = "0.4.0"
+description = "Macro Store — Flatpak, Snap, Homebrew ve AppImage destekli Linux yazılım mağazası"
 authors = ["Macro Store"]
+license = "GPL-3.0-or-later"
 edition = "2021"
 rust-version = "1.90.0"
 

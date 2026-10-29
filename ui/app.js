@@ -1,4 +1,4 @@
-/* Macro Store — Linux uygulama mağazası arayüzü.
+/* Macro Store — Flatpak, Snap, Homebrew ve AppImage kaynaklarını yöneten mağaza arayüzü.
    Framework ya da derleme adımı yok; düşük bellek kullanımı için saf JavaScript. */
 
 const TAURI = window.__TAURI__;
@@ -17,6 +17,7 @@ const UPDATE_WATCH_INTERVAL = 30 * 60 * 1000;
 const ACTIVITY_KEY = "macro-activity";
 const ACTIVITY_LIMIT = 25;
 const LIBRARY_PREFS_KEY = "macro-library-prefs";
+const APP_VERSION = "0.4.0";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -25,6 +26,7 @@ const ACTIONS = {
   install: { busy: "Kuruluyor…", verb: "kuruluyor", done: "Kurulum tamamlandı." },
   update: { busy: "Güncelleniyor…", verb: "güncelleniyor", done: "Güncelleme tamamlandı." },
   remove: { busy: "Kaldırılıyor…", verb: "kaldırılıyor", done: "Kaldırma tamamlandı." },
+  launch: { busy: "Açılıyor…", verb: "açılıyor", done: "Uygulama açıldı." },
 };
 const t = (key, vars) => (window.MacroI18n ? window.MacroI18n.t(key, vars) : key);
 
@@ -32,6 +34,7 @@ const ACTION_LABELS = {
   install: "Kurulum",
   update: "Güncelleme",
   remove: "Kaldırma",
+  launch: "Açma",
   prune: "Bakım",
   channel: "Kanal",
   mask: "Güncelleme durdurma",
@@ -43,6 +46,7 @@ const ACTION_LABEL_KEYS = {
   install: "action.install",
   update: "action.update",
   remove: "action.remove",
+  launch: "action.open",
   prune: "action.prune",
   channel: "action.channel",
   mask: "action.mask",
@@ -54,12 +58,21 @@ function actionLabel(action) {
   const key = ACTION_LABEL_KEYS[action];
   return key ? t(key) : ACTION_LABELS[action] || "";
 }
-const PROVIDER_NAMES = { flatpak: "Flatpak", snap: "Snap", brew: "Homebrew" };
+const PROVIDER_NAMES = { flatpak: "Flatpak", snap: "Snap", brew: "Homebrew", appimage: "AppImage" };
 const PROVIDER_FILTERS = [
   { value: "all", label: "Tümü" },
   { value: "flatpak", label: "Flatpak" },
   { value: "snap", label: "Snap" },
   { value: "brew", label: "Homebrew" },
+  { value: "appimage", label: "AppImage" },
+];
+const ACCENTS = [
+  { id: "default", labelKey: "settings.accent.default" },
+  { id: "red", labelKey: "settings.accent.red" },
+  { id: "blue", labelKey: "settings.accent.blue" },
+  { id: "green", labelKey: "settings.accent.green" },
+  { id: "yellow", labelKey: "settings.accent.yellow" },
+  { id: "purple", labelKey: "settings.accent.purple" },
 ];
 const INSTALLED_PAGE_SIZE = 40;
 const INSTALLED_SORTS = [
@@ -186,11 +199,12 @@ function providerManagerLabel(app) {
   const provider = appProvider(app);
   if (provider === "flatpak") return "Flatpak · kullanıcı kapsamı";
   if (provider === "snap") return "Snap · sistem kapsamı";
+  if (provider === "appimage") return "AppImage · yerel dosya";
   return providerLabel(app);
 }
 
 function providerActionLabel(action, app) {
-  const verbs = { install: "kur", update: "güncelle", remove: "kaldır" };
+  const verbs = { install: "kur", update: "güncelle", remove: "kaldır", launch: "aç" };
   const provider = appProvider(app);
   const scope = provider === "flatpak" ? " (kullanıcı kapsamı)" : provider === "snap" ? " (sistem kapsamı)" : "";
   return `${providerName(provider)} ile ${verbs[action] || "işlem yap"}${scope}`;
@@ -200,6 +214,7 @@ function providerInstallInfo(app) {
   const provider = appProvider(app);
   if (provider === "flatpak") return "Flatpak kullanıcı kapsamında kurulur";
   if (provider === "snap") return "Snap sistem kapsamında kurulur; yetkilendirme istenebilir";
+  if (provider === "appimage") return "Yerel AppImage dosyası; mağaza veri dizininde saklanır";
   return "Homebrew paket yöneticisiyle yönetilir";
 }
 
@@ -214,6 +229,7 @@ function cliCommand(app) {
     const token = id.replace(/^(formula|cask)\//, "");
     return isCask ? `brew install --cask ${token}` : `brew install ${token}`;
   }
+  if (provider === "appimage") return `$HOME/.local/share/macro-store/appimages/${id}.AppImage`;
   return "";
 }
 
@@ -246,6 +262,14 @@ function cliCommandsFor(app) {
       { label: "Güncelle", command: `brew upgrade${flag} ${token}` },
       { label: "Kaldır", command: `brew uninstall${flag} ${token}` },
       { label: "Bilgi", command: `brew info${flag} ${token}` },
+    ];
+  }
+  if (provider === "appimage") {
+    const path = `$HOME/.local/share/macro-store/appimages/${id}.AppImage`;
+    return [
+      { label: "Aç", command: path },
+      { label: "Kaldır", command: `rm "${path}"` },
+      { label: "Bilgi", command: `ls -l "${path}"` },
     ];
   }
   return [];
@@ -412,7 +436,7 @@ function syncStoredFromInstalled() {
 }
 
 function providerCounts(apps) {
-  const counts = { all: 0, flatpak: 0, snap: 0, brew: 0 };
+  const counts = { all: 0, flatpak: 0, snap: 0, brew: 0, appimage: 0 };
   if (!Array.isArray(apps)) return null;
   for (const app of apps) {
     counts.all += 1;
@@ -525,6 +549,7 @@ const state = {
   logs: [],
   pendingConfirm: null,
   gallery: null,
+  appimage: { picking: false, importing: false },
 };
 
 const els = {
@@ -572,6 +597,12 @@ const els = {
   confirmTitle: $("#confirmTitle"),
   confirmText: $("#confirmText"),
   confirmAccept: $("#confirmAccept"),
+  appimageModal: $("#appimageModal"),
+  appimagePath: $("#appimagePath"),
+  appimageName: $("#appimageName"),
+  appimageError: $("#appimageError"),
+  appimagePick: $("#appimagePick"),
+  appimageImport: $("#appimageImport"),
   lightbox: $("#lightbox"),
   lightboxImage: $("#lightboxImage"),
   lightboxCaption: $("#lightboxCaption"),
@@ -689,6 +720,27 @@ function setTheme(theme) {
   try { localStorage.setItem("macro-theme", next); } catch { /* yoksay */ }
 }
 
+function currentAccent() {
+  const value = document.documentElement.dataset.accent;
+  return ACCENTS.some(accent => accent.id === value) ? value : "default";
+}
+
+function setAccent(accent) {
+  const next = ACCENTS.some(item => item.id === accent) ? accent : "default";
+  document.documentElement.dataset.accent = next;
+  try { localStorage.setItem("macro-accent", next); } catch { /* yoksay */ }
+}
+
+function lowPowerEnabled() {
+  return document.documentElement.dataset.lowPower === "1";
+}
+
+function setLowPower(enabled) {
+  if (enabled) document.documentElement.dataset.lowPower = "1";
+  else delete document.documentElement.dataset.lowPower;
+  try { localStorage.setItem("macro-low-power", enabled ? "1" : "0"); } catch { /* yoksay */ }
+}
+
 function sanitizeDescription(html) {
   const raw = String(html || "").trim();
   if (!raw) return "";
@@ -740,6 +792,8 @@ function appIconHtml(app, extraClass = "") {
 
 function appTagsHtml(app, context = "") {
   const tags = [];
+  const provider = appProvider(app);
+  tags.push(`<span class="tag tag-source is-${attr(provider)}">${escapeHtml(providerName(provider))}</span>`);
   if (app.updateAvailable) tags.push('<span class="tag tag-update">Güncelleme</span>');
   if (app.pinned) tags.push('<span class="tag">Sabitlenmiş</span>');
   if (context === "search" && app.installed) tags.push('<span class="tag">Yüklü</span>');
@@ -787,7 +841,7 @@ function searchFilterHtml() {
   </div>`;
 }
 
-const PROVIDER_SORT_ORDER = { flatpak: 0, snap: 1, brew: 2 };
+const PROVIDER_SORT_ORDER = { flatpak: 0, snap: 1, brew: 2, appimage: 3 };
 
 function selectionKey(provider, id) {
   return `${provider}:${id}`;
@@ -866,7 +920,9 @@ function actionButtonsHtml(app, { large = false, hero = false, allowRemove = tru
   }
 
   const buttons = [];
-  if (app.updateAvailable) {
+  if (provider === "appimage") {
+    buttons.push(`<button class="${primary}" type="button" ${actionAttrs("launch")}${locked}>${t("action.open")}</button>`);
+  } else if (app.updateAvailable) {
     buttons.push(`<button class="${primary}" type="button" ${actionAttrs("update")}${locked}>${t("action.update")}</button>`);
   }
   if (allowRemove) {
@@ -2643,8 +2699,9 @@ function renderInstalled() {
         <h1>${t("nav.installed")}</h1>
         <p class="view-sub">${escapeHtml(summaryText)}${refreshedText ? `<span class="dot">·</span>${escapeHtml(refreshedText)}` : ""}</p>
       </div>
-      ${state.installed.length ? `<div class="view-tools">
-        <label class="library-search">
+      <div class="view-tools">
+        <button class="btn btn-ghost btn-sm" type="button" data-appimage-open>${t("appimage.add")}</button>
+        ${state.installed.length ? `<label class="library-search">
           ${ICON.search}
           <input type="search" data-installed-search value="${attr(state.installedQuery)}" placeholder="${t("search.placeholder")}" aria-label="${t("search.label")}" autocomplete="off" spellcheck="false" />
         </label>
@@ -2670,7 +2727,8 @@ function renderInstalled() {
         <button class="chip" type="button" data-selection-toggle aria-pressed="${state.selectionMode}">
           ${state.selectionMode ? "Seçimi kapat" : "Seç"}
         </button>
-      </div>` : ""}
+        ` : ""}
+      </div>
     </header>
     ${storeNoticeHtml()}
     ${providerNotice}
@@ -3002,7 +3060,9 @@ function renderDetail() {
     ? "Açıklama, ekran görüntüleri ve sürüm bilgileri Flathub’dan; topluluk puanları ve yorumları ODRS’den alınır. Kurulum ve kaldırma işlemleri kullanıcı kapsamında Flatpak ile yapılır."
     : provider === "snap"
       ? "Snap işlemleri sistem kapsamında yönetilir. İşlem sırasında sistem yetkilendirme penceresi açılabilir."
-      : "Kurulum, güncelleme ve kaldırma işlemleri Homebrew paket yöneticisiyle yönetilir.";
+      : provider === "appimage"
+        ? "Bu uygulama yerel bir AppImage dosyasıdır. Dosya Macro Store veri dizininde saklanır; güncellemek için yeni sürümü yeniden içe aktarın."
+        : "Kurulum, güncelleme ve kaldırma işlemleri Homebrew paket yöneticisiyle yönetilir.";
   const command = cliCommand(app);
 
   els.detailView.innerHTML = `
@@ -3117,6 +3177,12 @@ function languageOptionsHtml() {
 
 function renderSettings() {
   const theme = currentTheme();
+  const accent = currentAccent();
+  const lowPower = lowPowerEnabled();
+  const appimageCount = Math.max(
+    state.installed.filter(app => appProvider(app) === "appimage").length,
+    Number(state.storeInfo?.appimageCount) || 0,
+  );
   let repoBody;
 
   if (state.remotesLoading && !state.remotes.length) {
@@ -3219,7 +3285,7 @@ function renderSettings() {
         <h1>${t("nav.settings")}</h1>
         <p class="view-sub">${t("view.settings.sub")}</p>
       </div>
-      <p class="view-note">${t("view.settings.version", { version: "0.3.0" })}</p>
+      <p class="view-note">${t("view.settings.version", { version: APP_VERSION })}</p>
     </header>
 
     ${storeNoticeHtml()}
@@ -3238,6 +3304,24 @@ function renderSettings() {
           <span class="theme-preview dark" aria-hidden="true"></span>
           <span class="theme-label"><strong>${t("settings.themeDark")}</strong><span>${t("settings.themeDarkDesc")}</span></span>
         </button>
+      </div>
+      <div class="accent-row">
+        <span class="accent-label">${t("settings.accent")}</span>
+        ${ACCENTS.map(item => `<button class="accent-dot${accent === item.id ? " is-active" : ""}" type="button" data-accent-choice="${item.id}" aria-pressed="${accent === item.id}" title="${attr(t(item.labelKey))}" aria-label="${attr(`${t(item.labelKey)} ${t("settings.accent")}`)}"></button>`).join("")}
+      </div>
+    </section>
+
+    <section class="settings-section">
+      <div class="settings-head">
+        <h2>${t("settings.performance")}</h2>
+        <p>${t("settings.performanceDesc")}</p>
+      </div>
+      <div class="toggle-row">
+        <div class="toggle-text">
+          <h3>${t("settings.lowPower")}</h3>
+          <p>${t("settings.lowPowerDesc")}</p>
+        </div>
+        <button class="switch" type="button" role="switch" aria-checked="${lowPower}" data-low-power-toggle aria-label="${t("settings.lowPower")}"></button>
       </div>
     </section>
 
@@ -3269,6 +3353,14 @@ function renderSettings() {
         </div>
         ${managerStatusRowHtml("Snap", state.storeInfo?.snapAvailable)}
         ${managerStatusRowHtml("Homebrew", state.storeInfo?.brewAvailable)}
+        <div class="system-row">
+          <span class="status-dot is-ok" aria-hidden="true"></span>
+          <span>AppImage</span>
+          <strong>${appimageCount ? escapeHtml(t("settings.appimageCount", { count: appimageCount })) : escapeHtml(t("settings.appimageReady"))}</strong>
+        </div>
+      </div>
+      <div class="settings-actions">
+        <button class="btn btn-ghost btn-sm" type="button" data-appimage-open>${t("appimage.add")}</button>
       </div>
       ${setup?.distroName ? `<p class="system-meta">${escapeHtml(setup.distroName)}${setup.packageManagerLabel ? ` · ${escapeHtml(setup.packageManagerLabel)}` : ""}</p>` : ""}
       <button class="btn btn-ghost" type="button" data-open-setup>${flatpakReady && flathubReady ? "Kurulum bilgilerini aç" : "Kurulum sihirbazını aç"}</button>
@@ -3321,9 +3413,9 @@ function renderSettings() {
         <h2>Mağaza bilgileri</h2>
       </div>
       <div class="about-lines">
-        <div><strong>Macro Store</strong> 0.3.0 · Linux uygulama mağazası</div>
+        <div><strong>Macro Store</strong> ${APP_VERSION} · Linux uygulama mağazası</div>
         <div>Flatpak: <strong>${escapeHtml(flatpakVersion)}</strong> · Kullanıcı kapsamı</div>
-        <div>Snap sistem kapsamında yönetilir; Homebrew paketleri kendi yöneticisiyle çalışır.</div>
+        <div>Snap sistem kapsamında yönetilir; Homebrew paketleri kendi yöneticisiyle çalışır. AppImage dosyaları yerel olarak saklanır.</div>
       </div>
     </section>`;
 }
@@ -3477,8 +3569,34 @@ async function runPruneRuntimes() {
   }
 }
 
+async function performLaunch(app) {
+  if (!app || state.busy) return;
+  const provider = appProvider(app);
+  if (provider !== "appimage") {
+    toast("Bu uygulama mağaza üzerinden başlatılamıyor.", "error");
+    return;
+  }
+  state.busy = { id: app.id, provider, action: "launch", name: app.name || app.id };
+  showActivity(`${app.name || app.id} açılıyor…`);
+  renderRoute();
+
+  try {
+    await invoke("launch_appimage_file", { id: app.id });
+    recordActivity({ action: "launch", app, ok: true, message: ACTIONS.launch.done });
+    toast(`${app.name || "AppImage"} başlatıldı.`, "success");
+  } catch (err) {
+    recordActivity({ action: "launch", app, ok: false, message: errText(err) });
+    toast(errText(err), "error");
+  } finally {
+    state.busy = null;
+    hideActivity(600);
+    renderRoute();
+  }
+}
+
 async function performAction(action, app) {
   if (!app || state.busy || !ACTIONS[action]) return;
+  if (action === "launch") return performLaunch(app);
   const provider = appProvider(app);
   state.busy = { id: app.id, provider, action, name: app.name || app.id };
   showActivity(`${app.name || app.id} · ${providerManagerLabel(app)} ${ACTIONS[action].verb}…`);
@@ -3592,6 +3710,15 @@ async function runBatchAction(action, targets) {
 
 function askRemove(app) {
   const provider = appProvider(app);
+  if (provider === "appimage") {
+    askConfirm({
+      title: "Uygulamayı kaldır",
+      text: `${app.name || app.id} mağaza kayıtlarından ve uygulama menüsünden kaldırılacak. İçe aktarılan dosya silinir. Bu işlem geri alınamaz.`,
+      label: "Kaldır",
+      onConfirm: () => performAction("remove", app),
+    });
+    return;
+  }
   const explanation = provider === "flatpak"
     ? "kullanıcı kapsamındaki Flatpak kurulumundan"
     : provider === "snap"
@@ -3719,6 +3846,84 @@ function openLogModal() {
   renderLog();
   openModal(els.logModal);
   requestAnimationFrame(scrollLogToEnd);
+}
+
+/* ── AppImage içe aktarma ─────────────────────────── */
+
+function setAppImageError(message) {
+  if (!els.appimageError) return;
+  els.appimageError.textContent = message || "";
+  els.appimageError.hidden = !message;
+}
+
+function openAppImageModal() {
+  setAppImageError("");
+  if (els.appimagePath) els.appimagePath.value = "";
+  if (els.appimageName) els.appimageName.value = "";
+  openModal(els.appimageModal);
+  requestAnimationFrame(() => els.appimagePath?.focus());
+}
+
+async function pickAppImage() {
+  if (state.appimage.picking) return;
+  state.appimage.picking = true;
+  if (els.appimagePick) els.appimagePick.disabled = true;
+  try {
+    const path = await invoke("pick_appimage_file");
+    if (path) {
+      els.appimagePath.value = path;
+      const base = String(path).split(/[\\/]/).pop().replace(/\.appimage$/i, "");
+      if (els.appimageName && !els.appimageName.value.trim()) els.appimageName.value = base;
+      setAppImageError("");
+    }
+  } catch (err) {
+    setAppImageError(errText(err));
+  } finally {
+    state.appimage.picking = false;
+    if (els.appimagePick) els.appimagePick.disabled = false;
+  }
+}
+
+async function importAppImage() {
+  if (state.appimage.importing) return;
+  const path = String(els.appimagePath?.value || "").trim();
+  const name = String(els.appimageName?.value || "").trim();
+  if (!path) {
+    setAppImageError(t("appimage.chooseError"));
+    els.appimagePath?.focus();
+    return;
+  }
+
+  state.appimage.importing = true;
+  setAppImageError("");
+  const button = els.appimageImport;
+  if (button) {
+    button.disabled = true;
+    button.innerHTML = `<span class="spinner"></span>${t("appimage.importing")}`;
+  }
+  showActivity(t("appimage.importing"));
+
+  try {
+    const app = await invoke("import_appimage_file", { path, name: name || null });
+    toast(t("appimage.imported", { name: app?.name || "AppImage" }), "success");
+    closeModal(els.appimageModal);
+    state.installedLoaded = false;
+    await loadInstalled(true);
+    await loadStoreInfo();
+    if (app?.id && state.detail?.app?.id === app.id) loadDetail(app.id, "appimage", true);
+    if (state.route.name === "installed") renderInstalled();
+  } catch (err) {
+    const message = errText(err);
+    setAppImageError(message);
+    toast(message, "error");
+  } finally {
+    state.appimage.importing = false;
+    hideActivity(700);
+    if (button) {
+      button.disabled = false;
+      button.textContent = t("appimage.import");
+    }
+  }
 }
 
 /* ── Modallar ve görsel görüntüleyici ─────────────── */
@@ -4258,6 +4463,41 @@ function bindEvents() {
       return;
     }
 
+    const accentChoice = target.closest("[data-accent-choice]");
+    if (accentChoice) {
+      setAccent(accentChoice.dataset.accentChoice);
+      if (state.route.name === "settings") renderSettings();
+      toast(t("settings.accentUpdated"), "info");
+      return;
+    }
+
+    const lowPowerToggle = target.closest("[data-low-power-toggle]");
+    if (lowPowerToggle) {
+      const next = !lowPowerEnabled();
+      setLowPower(next);
+      if (state.route.name === "settings") renderSettings();
+      toast(next ? t("settings.lowPowerOn") : t("settings.lowPowerOff"), "info");
+      return;
+    }
+
+    const appimageOpen = target.closest("[data-appimage-open]");
+    if (appimageOpen) {
+      openAppImageModal();
+      return;
+    }
+
+    const appimagePick = target.closest("[data-appimage-pick]");
+    if (appimagePick) {
+      pickAppImage();
+      return;
+    }
+
+    const appimageImport = target.closest("[data-appimage-import]");
+    if (appimageImport) {
+      importAppImage();
+      return;
+    }
+
     const langChoice = target.closest("[data-lang-choice]");
     if (langChoice) {
       if (window.MacroI18n) window.MacroI18n.setLang(langChoice.dataset.langChoice);
@@ -4601,6 +4841,7 @@ const MOCK = {
   installed: new Set(mockLoad("macro-mock-installed", ["org.mozilla.firefox", "org.videolan.VLC"])),
   updates: new Set(mockLoad("macro-mock-updates", ["org.videolan.VLC"])),
   setup: mockLoad("macro-mock-setup", { flatpak: true, flathub: true }),
+  appimages: mockLoad("macro-mock-appimages", []),
   remotes: mockLoad("macro-mock-remotes", [
     { name: "flathub", title: "Flathub", url: "https://dl.flathub.org/repo/", scope: "user", comment: "Flathub uygulama deposu", icon: "https://dl.flathub.org/repo/logo.svg", deletable: false },
     { name: "flathub", title: "Flathub", url: "https://dl.flathub.org/repo/", scope: "system", comment: "Flathub uygulama deposu", icon: "https://dl.flathub.org/repo/logo.svg", deletable: false },
@@ -4609,6 +4850,7 @@ const MOCK = {
 };
 
 if (!Array.isArray(MOCK.remotes)) MOCK.remotes = [];
+if (!Array.isArray(MOCK.appimages)) MOCK.appimages = [];
 if (!MOCK.setup || typeof MOCK.setup !== "object") {
   MOCK.setup = { flatpak: true, flathub: true };
 }
@@ -4867,6 +5109,27 @@ function mockReviews(app) {
 }
 
 async function mockDetail(id, provider = "flatpak") {
+  if (provider === "appimage") {
+    const entry = MOCK.appimages.find(item => item.id === id);
+    if (!entry) throw new Error("AppImage kaydı bulunamadı.");
+    const app = mockAppImageItem(entry);
+    return {
+      app,
+      description: `Bu AppImage Macro Store üzerinden içe aktarıldı. Dosya konumu: ${entry.path}. Uygulama, sistemdeki diğer AppImage’lar gibi bağımsız çalışır; mağaza üzerinden kaldırılabilir veya yeniden başlatılabilir.`,
+      screenshots: [],
+      categories: [],
+      license: "",
+      verified: false,
+      homepage: null,
+      downloadSize: entry.size,
+      installedSize: entry.size,
+      installsLastMonth: null,
+      rating: null,
+      reviews: [],
+      releases: [],
+    };
+  }
+
   if (provider === "snap") {
     const installed = state.installed.find(app => sameApp(app, "snap", id));
     const app = installed || {
@@ -5007,6 +5270,86 @@ async function mockDetail(id, provider = "flatpak") {
   };
 }
 
+function mockAppImageItem(entry) {
+  return {
+    id: entry.id,
+    provider: "appimage",
+    packageType: null,
+    name: entry.name,
+    summary: "Macro Store üzerinden içe aktarılan AppImage",
+    developer: "Yerel AppImage",
+    version: "Yerel",
+    icon: entry.icon || null,
+    installed: true,
+    updateAvailable: false,
+    pinned: false,
+    channel: null,
+    category: null,
+    monthlyInstalls: null,
+    heroImage: null,
+    verified: false,
+    license: null,
+    freeLicense: false,
+  };
+}
+
+function mockAppImageSlug(value) {
+  return String(value || "")
+    .toLocaleLowerCase("tr")
+    .replace(/[çğıöşü]/g, char => ({ ç: "c", ğ: "g", ı: "i", ö: "o", ş: "s", ü: "u" })[char] || char)
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64) || "appimage";
+}
+
+function mockPickAppImage() {
+  return "/home/kullanıcı/İndirilenler/MacroOrnek.AppImage";
+}
+
+function mockImportAppImage(path, name) {
+  const clean = String(path || "").trim();
+  if (!/\.appimage$/i.test(clean)) {
+    throw new Error("Seçilen dosya bir .AppImage değil.");
+  }
+  const base = clean.split(/[\\/]/).pop() || "Uygulama.AppImage";
+  const display = String(name || "").trim() || base.replace(/\.appimage$/i, "");
+  const baseSlug = mockAppImageSlug(display);
+  let id = baseSlug;
+  let suffix = 2;
+  while (MOCK.appimages.some(item => item.id === id)) {
+    id = `${baseSlug}-${suffix}`;
+    suffix += 1;
+  }
+  const entry = {
+    id,
+    name: display,
+    path: clean,
+    icon: null,
+    size: 42 * 1024 * 1024,
+    importedAt: Math.floor(Date.now() / 1000),
+  };
+  MOCK.appimages.push(entry);
+  mockSave("macro-mock-appimages", MOCK.appimages);
+  emitMock("app-log", { line: `✓ ${display} AppImage olarak içe aktarıldı.`, kind: "info" });
+  return mockAppImageItem(entry);
+}
+
+function mockRemoveAppImage(id) {
+  const before = MOCK.appimages.length;
+  MOCK.appimages = MOCK.appimages.filter(entry => entry.id !== id);
+  if (MOCK.appimages.length === before) throw new Error("AppImage bulunamadı.");
+  mockSave("macro-mock-appimages", MOCK.appimages);
+  emitMock("app-log", { line: "✓ AppImage kaldırıldı.", kind: "info" });
+  return "AppImage kaldırıldı.";
+}
+
+function mockLaunchAppImage(id) {
+  const entry = MOCK.appimages.find(item => item.id === id);
+  if (!entry) throw new Error("AppImage bulunamadı.");
+  emitMock("app-log", { line: `✓ ${entry.name} başlatıldı.`, kind: "info" });
+  return null;
+}
+
 async function mockInstalledApps() {
   const apps = await Promise.all([...MOCK.installed].map(id =>
     mockAppstream(id).then(entry => entry.app).catch(() => mockFallback(id)),
@@ -5056,6 +5399,24 @@ function mockRemoveRemote(name) {
 }
 
 async function mockOperation(action, id, provider = "flatpak") {
+  if (provider === "appimage") {
+    if (action !== "remove") {
+      throw new Error(action === "install"
+        ? "AppImage kurulumu için “AppImage içe aktar” akışını kullanın."
+        : "AppImage dosyaları mağaza üzerinden güncellenemez.");
+    }
+    const message = mockRemoveAppImage(id);
+    const outcome = {
+      success: true,
+      code: null,
+      message,
+      appId: id,
+      action,
+      manager: "AppImage",
+    };
+    emitMock("app-finished", outcome);
+    return outcome;
+  }
   if (provider !== "flatpak") {
     throw new Error("Tarayıcı demosunda bu sağlayıcı için örnek uygulama yok.");
   }
@@ -5198,6 +5559,7 @@ async function mockInvoke(command, args = {}) {
       flatpakVersion: MOCK.setup.flatpak ? "1.18.4" : null,
       flathubAvailable: Boolean(MOCK.setup.flathub),
       userFlathubAvailable: Boolean(MOCK.setup.flathub),
+      appimageCount: MOCK.appimages.length,
     };
   }
 
@@ -5232,10 +5594,37 @@ async function mockInvoke(command, args = {}) {
 
   if (command === "list_installed_apps") {
     await sleep(180);
+    const flatpakApps = MOCK.setup.flatpak ? await mockInstalledApps() : [];
     return {
-      apps: MOCK.setup.flatpak ? await mockInstalledApps() : [],
+      apps: [...flatpakApps, ...MOCK.appimages.map(mockAppImageItem)]
+        .sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "tr", { sensitivity: "base" })),
       providerErrors: [],
     };
+  }
+
+  if (command === "list_appimages") {
+    await sleep(120);
+    return MOCK.appimages.map(mockAppImageItem);
+  }
+
+  if (command === "pick_appimage_file") {
+    await sleep(160);
+    return mockPickAppImage();
+  }
+
+  if (command === "import_appimage_file") {
+    await sleep(420);
+    return mockImportAppImage(args.path, args.name);
+  }
+
+  if (command === "remove_appimage_file") {
+    await sleep(260);
+    return mockRemoveAppImage(args.id);
+  }
+
+  if (command === "launch_appimage_file") {
+    await sleep(180);
+    return mockLaunchAppImage(args.id);
   }
 
   if (command === "library_usage") {

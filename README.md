@@ -3,7 +3,8 @@
 Macro Store, **Flathub** kataloğunu sade ve göz yormayan bir arayüzle sunan
 hafif bir Linux yazılım mağazasıdır. Uygulamaları keşfeder, arar, ayrıntılarını
 ve topluluk yorumlarını inceler; Flatpak, Snap ve Linux Homebrew paketlerini
-tek ekrandan bulur ve yönetir.
+tek ekrandan bulur ve yönetir. Dışarıdan indirilen **AppImage** dosyalarını da
+mağazaya ekleyebilirsiniz.
 
 Flathub kataloğu Flatpak için ana mağaza deneyimini sağlar. Snap Store ve
 Homebrew desteklenen sistemlerde ayrı sağlayıcılar olarak aranabilir ve
@@ -13,6 +14,7 @@ kurmak için çağrılır.
 ## Özellikler
 
 - Tauri 2 + Rust arka uç, saf HTML/CSS/JS ön yüz (npm/bundler yok)
+- Dört kaynak: Flatpak/Flathub, Snap Store, Homebrew formülleri ve casks, AppImage
 - Flathub'dan günün uygulaması, haftanın seçkisi, popüler ve yeni eklenenler
 - Kategoriler, arama ve uygulama ayrıntı ekranı
 - Flathub açıklaması, sürüm bilgisi, ekran görüntüleri ve bağlantılar
@@ -20,6 +22,7 @@ kurmak için çağrılır.
 - Kullanıcı kapsamında Flatpak kurulum, kaldırma ve güncelleme
 - Snap Store araması ve Snap paket işlemleri (sistem kapsamında; Polkit gerekebilir)
 - Linux Homebrew formula ve Linux desteği bildiren cask paketleri
+- Dışarıdan AppImage içe aktarma; dosya kopyalama, çalıştırma izni ve menü kaydı
 - Yüklü uygulamalar listesi ve sağlayıcı/güncelleme filtreleri
 - Yüklü uygulamalar listesi 40'arlı parçalar halinde açılır; sağlayıcı hataları
   başarılı kaynakların sonuçlarını gizlemez.
@@ -53,11 +56,13 @@ kurmak için çağrılır.
 - Sistem tepsisi simgesi bekleyen güncelleme sayısını gösterir; tepsi menüsünden
   mağaza açılabilir ya da güncellemeler denetlenebilir.
 - Çevrimdışıyken son yüklü uygulama listesi önbellekten gösterilir.
-- Açık ve koyu tema; seçim yerel olarak saklanır
+- Açık ve koyu tema; Kırmızı, Mavi, Yeşil, Sarı ve Mor vurgu renkleri
+- Etkinleştirilebilir **Düşük Güç Modu** (animasyon, gölge ve bulanıklığı azaltır)
 - Türkçe ve İngilizce arayüz; dil seçimi yerel olarak saklanır
 - `macro-store://` derin bağlantıları: uygulama ayrıntısı ve arama
 - Depo yönetimi: Flathub korunur, özel Flatpak kullanıcı depoları eklenebilir
 - Adwaita Sans fontu uygulamaya gömülüdür; harici font isteği yapılmaz
+- GPLv3 lisansı
 
 ## İlk açılış ve sistem hazırlığı
 
@@ -138,6 +143,20 @@ veya ortamı otomatik değiştirmez. `brew` komutu `PATH` veya yaygın Linuxbrew
 - Homebrew katalog araması/ayrıntıları için Linux Homebrew kurulumunun hazır
   olması gerekir.
 
+## AppImage
+
+Dışarıdan edinilen `.AppImage` dosyaları **Yüklü Uygulamalar → AppImage ekle**
+düğmesiyle içe aktarılır:
+
+- Dosya `~/.local/share/macro-store/appimages` altına kopyalanır ve çalıştırma
+  izni verilir; özgün dosya yerinde kalır.
+- Uygulama menüsü için `~/.local/share/applications/macro-store-<ad>.desktop`
+  kaydı üretilir.
+- AppImage içinden simge çıkarılabiliyorsa `hicolor` simge dizinine yazılır.
+- Dosya seçimi `zenity` veya `kdialog` ile yapılır.
+- AppImage kayıtları mağaza üzerinden açılabilir, kaldırılabilir ve dosya
+  konumu görüntülenebilir. Güncelleme için yeni sürümü yeniden içe aktarın.
+
 ## Gereksinimler
 
 - Flatpak 1.12 veya üzeri (ilk açılışta kurulabilir)
@@ -153,12 +172,12 @@ Proje kökünde çalışmaya hazır iki paket bulunur:
 
 ```bash
 # Debian / Ubuntu
-sudo apt install ./MacroStore_0.3.0_amd64.deb
+sudo apt install ./MacroStore_0.4.0_amd64.deb
 
 # Fedora / RHEL / openSUSE
-sudo dnf install ./MacroStore-0.3.0-1.x86_64.rpm
+sudo dnf install ./MacroStore-0.4.0-1.x86_64.rpm
 # veya
-sudo zypper install ./MacroStore-0.3.0-1.x86_64.rpm
+sudo zypper install ./MacroStore-0.4.0-1.x86_64.rpm
 ```
 
 Kurulumdan sonra uygulamayı uygulama menüsünden veya terminalden açın:
@@ -170,7 +189,7 @@ macro-store
 Paket bütünlüğünü doğrulamak için:
 
 ```bash
-sha256sum -c MacroStore_0.3.0.sha256
+sha256sum -c MacroStore_0.4.0.sha256
 ```
 
 ## Hazır AppImage
@@ -178,15 +197,15 @@ sha256sum -c MacroStore_0.3.0.sha256
 Proje kökündeki taşınabilir AppImage sürümü:
 
 ```bash
-chmod +x MacroStore_0.3.0_amd64.AppImage
-./MacroStore_0.3.0_amd64.AppImage
+chmod +x MacroStore_0.4.0_amd64.AppImage
+./MacroStore_0.4.0_amd64.AppImage
 ```
 
 AppImage; GTK 3 ve WebKitGTK 4.1 kütüphanelerini kendi içinde taşır. Sistemde
 FUSE yoksa:
 
 ```bash
-APPIMAGE_EXTRACT_AND_RUN=1 ./MacroStore_0.3.0_amd64.AppImage
+APPIMAGE_EXTRACT_AND_RUN=1 ./MacroStore_0.4.0_amd64.AppImage
 ```
 
 ## Geliştirme
@@ -265,8 +284,8 @@ birimi kullanır; en küçük ikili dosya boyutu yerine çalıştırma performan
 Çıktılar:
 
 ```
-src-tauri/target/release/bundle/deb/Macro Store_0.3.0_amd64.deb
-src-tauri/target/release/bundle/rpm/Macro Store-0.3.0-1.x86_64.rpm
+src-tauri/target/release/bundle/deb/Macro Store_0.4.0_amd64.deb
+src-tauri/target/release/bundle/rpm/Macro Store-0.4.0-1.x86_64.rpm
 ```
 
 AppImage isteğe bağlı olarak ayrıca üretilebilir:
@@ -278,7 +297,7 @@ cargo tauri build --bundles appimage
 Çıktı:
 
 ```
-src-tauri/target/release/bundle/appimage/Macro Store_0.3.0_amd64.AppImage
+src-tauri/target/release/bundle/appimage/Macro Store_0.4.0_amd64.AppImage
 ```
 
 ## Proje yapısı
@@ -294,6 +313,7 @@ src-tauri/
   src/lib.rs              Sağlayıcı entegrasyonu, Flathub API/ODRS ve Flatpak
   src/snap.rs             Snap Store araması, snapd envanteri ve işlemleri
   src/brew.rs             Linux Homebrew araması, formula/cask ve işlemler
+  src/appimage.rs         Yerel AppImage içe aktarma, listeleme ve kaldırma
   tauri.conf.json         Pencere, CSP ve deb/rpm/AppImage paketleme ayarları
   capabilities/           Tauri yetkileri
   icons/                  Uygulama simgeleri
@@ -337,5 +357,6 @@ LICENSE
 
 ## Lisans
 
-MIT lisansı altında sunulmuştur. Gömülü Adwaita Sans fontu SIL Open Font
-License 1.1 (OFL-1.1) ile lisanslanmıştır.
+GNU General Public License v3.0 (GPL-3.0-or-later) altında sunulmuştur.
+Gömülü Adwaita Sans fontu SIL Open Font License 1.1 (OFL-1.1) ile
+lisanslanmıştır.

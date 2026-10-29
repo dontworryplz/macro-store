@@ -259,6 +259,58 @@
     </div>
   </div>
 
+  <div id="appimageModal" class="modal" hidden>
+    <div class="modal-card appimage-card" role="dialog" aria-modal="true" aria-labelledby="appimageTitle">
+      <header class="modal-head">
+        <div class="modal-title">
+          <h2 id="appimageTitle" data-i18n="appimage.title">AppImage içe aktar</h2>
+          <p data-i18n="appimage.subtitle">Dışarıdan edindiğiniz AppImage dosyasını mağazaya ekleyin.</p>
+        </div>
+        <div class="modal-tools">
+          <button class="icon-btn" type="button" data-close-modal="appimageModal" data-i18n-aria="appimage.close" aria-label="AppImage penceresini kapat">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="m7 7 10 10M17 7 7 17" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+            </svg>
+          </button>
+        </div>
+      </header>
+      <div class="appimage-body">
+        <label class="form-label" for="appimagePath" data-i18n="appimage.path">AppImage dosyası</label>
+        <div class="path-row">
+          <input
+            id="appimagePath"
+            class="field"
+            type="text"
+            placeholder="/home/kullanıcı/İndirilenler/Uygulama.AppImage"
+            data-i18n-placeholder="appimage.pathPlaceholder"
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <button id="appimagePick" class="btn btn-ghost" type="button" data-appimage-pick data-i18n="appimage.pick">Göz at</button>
+        </div>
+        <label class="form-label" for="appimageName">
+          <span data-i18n="appimage.name">Görünen ad</span>
+          <span class="form-hint" data-i18n="appimage.nameHint">(isteğe bağlı)</span>
+        </label>
+        <input
+          id="appimageName"
+          class="field"
+          type="text"
+          maxlength="80"
+          placeholder="Boş bırakılırsa dosya adı kullanılır"
+          data-i18n-placeholder="appimage.namePlaceholder"
+          autocomplete="off"
+        />
+        <p class="drop-hint" data-i18n="appimage.hint">Dosya kopyalanır, çalıştırılabilir yapılır ve uygulama menüsüne eklenir. Özgün dosya yerinde kalır.</p>
+        <p id="appimageError" class="modal-error" role="alert" hidden></p>
+        <div class="modal-actions">
+          <button class="btn btn-ghost" type="button" data-close-modal="appimageModal" data-i18n="common.cancel">Vazgeç</button>
+          <button id="appimageImport" class="btn btn-primary" type="button" data-appimage-import data-i18n="appimage.import">İçe aktar</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div id="lightbox" class="lightbox" hidden>
     <button class="lightbox-close icon-btn" type="button" data-lightbox-close data-i18n-aria="lightbox.close" aria-label="Kapat">
       <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">

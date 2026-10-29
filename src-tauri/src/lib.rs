@@ -1,3 +1,4 @@
+mod appimage;
 mod brew;
 mod snap;
 mod tray;
@@ -137,6 +138,7 @@ struct StoreInfo {
     user_flathub_available: bool,
     snap_available: bool,
     brew_available: bool,
+    appimage_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1327,8 +1329,8 @@ fn load_installed_cache() -> Vec<AppItem> {
         .unwrap_or_default()
 }
 
-fn installed_apps_response(
-    providers: [(&str, Result<Vec<AppItem>, String>); 3],
+fn installed_apps_response<const N: usize>(
+    providers: [(&str, Result<Vec<AppItem>, String>); N],
 ) -> InstalledAppsResponse {
     let mut response = InstalledAppsResponse {
         apps: Vec::new(),
@@ -2079,6 +2081,7 @@ async fn get_store_info() -> Result<StoreInfo, String> {
             user_flathub_available,
             snap_available: snap::available(),
             brew_available: brew::available(),
+            appimage_count: appimage::count(),
         }
     })
     .await
@@ -2271,6 +2274,7 @@ async fn get_category(slug: String, page: Option<u32>) -> Result<CategoryPage, S
 async fn get_app_detail(app_id: String, provider: String) -> Result<AppDetail, String> {
     match provider.as_str() {
         "flatpak" => get_flatpak_app_detail(app_id).await,
+        "appimage" => appimage::detail(&app_id),
         "snap" => {
             let detail = snap::detail(&app_id).await?;
             let app = app_from_snap(detail.app);
@@ -2559,7 +2563,12 @@ async fn list_installed_apps() -> InstalledAppsResponse {
     let brew = brew
         .map_err(|error| format!("Homebrew envanteri okunamadı: {error}"))
         .and_then(|result| result);
-    installed_apps_response([("flatpak", flatpak), ("snap", snap), ("brew", brew)])
+    installed_apps_response([
+        ("flatpak", flatpak),
+        ("snap", snap),
+        ("brew", brew),
+        ("appimage", Ok(appimage::installed())),
+    ])
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3039,8 +3048,77 @@ async fn run_app_action(
     match provider.as_str() {
         "flatpak" => run_flatpak_action(app, id, action).await,
         "snap" | "brew" => run_provider_action(app, id, provider, action).await,
+        "appimage" => run_appimage_action(app, id, action).await,
         _ => Err("Paket sağlayıcısı geçersiz.".to_string()),
     }
+}
+
+async fn run_appimage_action(
+    app: AppHandle,
+    id: String,
+    action: ActionKind,
+) -> Result<OperationOutcome, String> {
+    match action {
+        ActionKind::Remove => {
+            if SETTING_UP.load(Ordering::SeqCst) {
+                return Err(
+                    "Sistem hazırlığı sürüyor. Lütfen tamamlandıktan sonra yeniden deneyin."
+                        .to_string(),
+                );
+            }
+            if OPERATING
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+            {
+                return Err("Zaten devam eden bir işlem var.".to_string());
+            }
+            let _lock = OperationLock;
+            let message = appimage::remove(&id)?;
+            emit_log(&app, format!("✓ {message}"), "info");
+            let outcome = OperationOutcome {
+                success: true,
+                code: None,
+                message,
+                app_id: id,
+                action: action.as_str().to_string(),
+                manager: "AppImage".to_string(),
+            };
+            let _ = app.emit("app-finished", outcome.clone());
+            Ok(outcome)
+        }
+        ActionKind::Install => Err(
+            "AppImage kurulumu için “AppImage içe aktar” akışını kullanın.".to_string(),
+        ),
+        ActionKind::Update => Err(
+            "AppImage dosyaları kendi güncelleme yöntemleriyle yenilenir; mağaza üzerinden güncellenemez."
+                .to_string(),
+        ),
+    }
+}
+
+#[tauri::command]
+fn list_appimages() -> Result<Vec<AppItem>, String> {
+    Ok(appimage::installed())
+}
+
+#[tauri::command]
+fn pick_appimage_file() -> Result<Option<String>, String> {
+    appimage::pick()
+}
+
+#[tauri::command]
+fn import_appimage_file(path: String, name: Option<String>) -> Result<AppItem, String> {
+    appimage::import(&path, name)
+}
+
+#[tauri::command]
+fn remove_appimage_file(id: String) -> Result<String, String> {
+    appimage::remove(&id)
+}
+
+#[tauri::command]
+fn launch_appimage_file(id: String) -> Result<(), String> {
+    appimage::launch(&id)
 }
 
 async fn run_flatpak_action(
@@ -3579,6 +3657,11 @@ pub fn run() {
             list_flatpak_remotes,
             add_flatpak_remote,
             remove_flatpak_remote,
+            list_appimages,
+            pick_appimage_file,
+            import_appimage_file,
+            remove_appimage_file,
+            launch_appimage_file,
             install_app,
             remove_app,
             update_app,
