@@ -109,6 +109,7 @@ struct FlatpakSnapshot {
     updates: HashSet<String>,
     masked: HashSet<String>,
     apps: Vec<FlatpakInstalled>,
+    items: Vec<AppItem>,
 }
 
 struct OperationLock;
@@ -156,6 +157,12 @@ struct AppItem {
     category: Option<String>,
     monthly_installs: Option<u64>,
     hero_image: Option<String>,
+    #[serde(default)]
+    verified: bool,
+    #[serde(default)]
+    license: Option<String>,
+    #[serde(default)]
+    free_license: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -409,6 +416,12 @@ struct ApiApp {
     main_categories: Option<StringOrVec>,
     #[serde(default)]
     installs_last_month: Option<u64>,
+    #[serde(default)]
+    verification_verified: Option<bool>,
+    #[serde(default)]
+    project_license: Option<String>,
+    #[serde(default)]
+    is_free_license: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1144,11 +1157,13 @@ fn read_flatpak_snapshot() -> FlatpakSnapshot {
         )
     });
     let installed = apps.iter().map(|app| app.app_id.clone()).collect();
+    let items = installed_items(&apps, &updates, &masked);
     FlatpakSnapshot {
         installed,
         updates,
         masked,
         apps,
+        items,
     }
 }
 
@@ -1246,11 +1261,17 @@ fn invalidate_icon_cache() {
 }
 
 fn installed_apps(snapshot: &FlatpakSnapshot) -> Vec<AppItem> {
-    snapshot
-        .apps
-        .iter()
+    snapshot.items.clone()
+}
+
+fn installed_items(
+    apps: &[FlatpakInstalled],
+    updates: &HashSet<String>,
+    masked: &HashSet<String>,
+) -> Vec<AppItem> {
+    apps.iter()
         .map(|installed| {
-            let update_available = snapshot.updates.contains(&installed.app_id);
+            let update_available = updates.contains(&installed.app_id);
             AppItem {
                 id: installed.app_id.clone(),
                 provider: "flatpak".to_string(),
@@ -1263,11 +1284,14 @@ fn installed_apps(snapshot: &FlatpakSnapshot) -> Vec<AppItem> {
                     .or_else(|| Some(flatpak_icon_url(&installed.app_id))),
                 installed: true,
                 update_available,
-                pinned: snapshot.masked.contains(&installed.app_id),
+                pinned: masked.contains(&installed.app_id),
                 channel: None,
                 category: None,
                 monthly_installs: None,
                 hero_image: None,
+                verified: false,
+                license: None,
+                free_license: false,
             }
         })
         .collect()
@@ -1555,6 +1579,9 @@ fn app_from_api(
         category,
         monthly_installs: app.installs_last_month,
         hero_image: None,
+        verified: app.verification_verified.unwrap_or(false),
+        license: app.project_license,
+        free_license: app.is_free_license.unwrap_or(false),
         id,
         provider: "flatpak".to_string(),
         package_type: None,
@@ -1578,6 +1605,9 @@ fn app_from_snap(item: snap::ProviderApp) -> AppItem {
         category: item.category,
         monthly_installs: None,
         hero_image: item.hero_image,
+        verified: false,
+        license: None,
+        free_license: false,
     }
 }
 
@@ -1598,6 +1628,9 @@ fn app_from_brew(item: brew::ProviderApp) -> AppItem {
         category: item.category,
         monthly_installs: None,
         hero_image: None,
+        verified: false,
+        license: None,
+        free_license: false,
     }
 }
 
@@ -1619,6 +1652,9 @@ fn fallback_app(id: &str, installed: &HashSet<String>, updates: &HashSet<String>
         category: None,
         monthly_installs: None,
         hero_image: None,
+        verified: false,
+        license: None,
+        free_license: false,
     }
 }
 
@@ -1727,6 +1763,8 @@ async fn fetch_appstream_item(
                 .map(|item| item.url.clone());
             let category = main_category_from_appstream(&appstream.categories);
             let update_available = is_installed && updates.contains(&id);
+            let verified = verified(&appstream);
+            let license = Some(appstream.project_license.clone()).filter(|value| !value.is_empty());
             AppItem {
                 id,
                 provider: "flatpak".to_string(),
@@ -1754,6 +1792,9 @@ async fn fetch_appstream_item(
                 category,
                 monthly_installs: None,
                 hero_image,
+                verified,
+                license,
+                free_license: false,
             }
         }
         Err(_) => fallback_app(&id, installed, updates),
@@ -1835,6 +1876,9 @@ fn flatpak_search_fallback(
             category: None,
             monthly_installs: None,
             hero_image: None,
+            verified: false,
+            license: None,
+            free_license: false,
         });
         if apps.len() >= SEARCH_LIMIT {
             break;
@@ -2382,6 +2426,9 @@ async fn get_flatpak_app_detail(app_id: String) -> Result<AppDetail, String> {
         category: main_category_from_appstream(&appstream.categories),
         monthly_installs,
         hero_image: screenshots.first().map(|item| item.url.clone()),
+        verified: verified(&appstream),
+        license: Some(appstream.project_license.clone()).filter(|value| !value.is_empty()),
+        free_license: false,
     };
 
     let rating = ratings.and_then(|value| {
@@ -3841,6 +3888,9 @@ org.example.Beta	Beta		2.0
             category: None,
             monthly_installs: None,
             hero_image: None,
+            verified: false,
+            license: None,
+            free_license: false,
         };
         let response = installed_apps_response([
             ("flatpak", Ok(vec![app("flatpak", "org.example.App")])),
@@ -3878,6 +3928,9 @@ org.example.Beta	Beta		2.0
             category: None,
             monthly_installs: None,
             hero_image: None,
+            verified: false,
+            license: None,
+            free_license: false,
         };
         let response = search_apps_response([
             ("Flatpak", Err("Flathub timeout".to_string())),

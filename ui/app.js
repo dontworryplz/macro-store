@@ -460,6 +460,8 @@ const state = {
   searchProviderErrors: [],
   searchSeq: 0,
   searchProvider: "all",
+  searchVerifiedOnly: false,
+  searchFreeOnly: false,
   discover: null,
   discoverLoading: false,
   discoverError: "",
@@ -761,6 +763,28 @@ function appMetaHtml(app) {
 }
 function providerMatches(app, selected) {
   return selected === "all" || appProvider(app) === selected;
+}
+
+function searchMatches(app) {
+  if (!providerMatches(app, state.searchProvider)) return false;
+  if (state.searchVerifiedOnly && !app.verified) return false;
+  if (state.searchFreeOnly && !app.freeLicense) return false;
+  return true;
+}
+
+function searchFiltersActive() {
+  return state.searchVerifiedOnly || state.searchFreeOnly;
+}
+
+function searchFilterHtml() {
+  return `<div class="provider-filters" role="group" aria-label="${attr(t("search.filters.label"))}">
+    <button class="chip" type="button" data-search-flag="verified" aria-pressed="${state.searchVerifiedOnly}">
+      ${ICON.check}${t("search.verified")}
+    </button>
+    <button class="chip" type="button" data-search-flag="free" aria-pressed="${state.searchFreeOnly}">
+      ${t("search.freeLicense")}
+    </button>
+  </div>`;
 }
 
 const PROVIDER_SORT_ORDER = { flatpak: 0, snap: 1, brew: 2 };
@@ -2325,7 +2349,7 @@ function renderDiscover() {
 
 function renderSearch() {
   const query = state.query;
-  const visible = state.searchResults.filter(app => providerMatches(app, state.searchProvider));
+  const visible = state.searchResults.filter(searchMatches);
   const count = visible.length;
   const providerErrors = state.searchProviderErrors.filter(issue =>
     state.searchProvider === "all" || issue.provider === providerName(state.searchProvider),
@@ -2338,7 +2362,9 @@ function renderSearch() {
       ? "Aranıyor…"
       : state.searchError
         ? "Arama tamamlanamadı"
-        : `${count} sonuç`;
+        : searchFiltersActive()
+          ? `${count} sonuç · filtreli`
+          : `${count} sonuç`;
 
   let body;
   if (tooShort) {
@@ -2363,6 +2389,12 @@ function renderSearch() {
       retry: "search",
       icon: ICON.warning,
     });
+  } else if (!count && hasResults && searchFiltersActive()) {
+    body = stateHtml({
+      title: "Filtrelerle eşleşen sonuç yok",
+      text: "Etkin filtreleri kaldırın ya da farklı bir sağlayıcı seçin.",
+      icon: ICON.search,
+    }) + `<p class="view-note"><button class="chip" type="button" data-search-clear-filters>Filtreleri temizle</button></p>`;
   } else if (!count) {
     body = stateHtml({
       title: hasResults ? "Bu sağlayıcıda sonuç yok" : "Sonuç bulunamadı",
@@ -2387,6 +2419,7 @@ function renderSearch() {
     : `<div class="view-tools">
         <p class="view-note">${escapeHtml(meta)}</p>
         ${providerFilterHtml("search", state.searchProvider, state.searchResults)}
+        ${searchFilterHtml()}
       </div>`;
 
   els.searchView.innerHTML = `
@@ -4000,6 +4033,23 @@ function bindEvents() {
       return;
     }
 
+    const searchFlag = target.closest("[data-search-flag]");
+    if (searchFlag) {
+      const flag = searchFlag.dataset.searchFlag;
+      if (flag === "verified") state.searchVerifiedOnly = !state.searchVerifiedOnly;
+      else if (flag === "free") state.searchFreeOnly = !state.searchFreeOnly;
+      else return;
+      renderSearch();
+      return;
+    }
+
+    if (target.closest("[data-search-clear-filters]")) {
+      state.searchVerifiedOnly = false;
+      state.searchFreeOnly = false;
+      renderSearch();
+      return;
+    }
+
     const selectionToggle = target.closest("[data-selection-toggle]");
     if (selectionToggle) {
       state.selectionMode = !state.selectionMode;
@@ -4694,6 +4744,9 @@ function mockApiApp(hit) {
     category: normalizeCategory(hit.main_categories) || mockCategoryFromAppstream(hit.categories),
     monthlyInstalls: hit.installs_last_month || null,
     heroImage: hit.hero_image || null,
+    verified: Boolean(hit.verification_verified),
+    license: hit.project_license || null,
+    freeLicense: Boolean(hit.is_free_license),
   };
 }
 

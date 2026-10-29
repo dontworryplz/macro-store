@@ -24,6 +24,9 @@
       "search.label": "Uygulama ara",
       "search.clear": "Aramayı temizle",
       "search.history": "Son aramalar",
+      "search.filters.label": "Arama sonuçlarını filtrele",
+      "search.verified": "Doğrulanmış",
+      "search.freeLicense": "Özgür lisans",
 
       "topbar.back": "Geri",
       "topbar.shortcuts": "Klavye kısayolları",
@@ -149,6 +152,9 @@
       "search.label": "Search apps",
       "search.clear": "Clear search",
       "search.history": "Recent searches",
+      "search.filters.label": "Filter search results",
+      "search.verified": "Verified",
+      "search.freeLicense": "Free license",
 
       "topbar.back": "Back",
       "topbar.shortcuts": "Keyboard shortcuts",
