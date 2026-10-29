@@ -168,7 +168,7 @@ Paketler, Tauri'nin ürettiği bağımlılık listesiyle birlikte gelir. `.deb` 
 
 ## Hazır paketler
 
-Proje kökünde çalışmaya hazır iki paket bulunur:
+Proje kökünde çalışmaya hazır üç paket bulunur:
 
 ```bash
 # Debian / Ubuntu
@@ -178,6 +178,9 @@ sudo apt install ./MacroStore_0.4.0_amd64.deb
 sudo dnf install ./MacroStore-0.4.0-1.x86_64.rpm
 # veya
 sudo zypper install ./MacroStore-0.4.0-1.x86_64.rpm
+
+# Arch Linux / Manjaro
+sudo pacman -U ./macro-store-0.4.0-1-x86_64.pkg.tar.zst
 ```
 
 Kurulumdan sonra uygulamayı uygulama menüsünden veya terminalden açın:
