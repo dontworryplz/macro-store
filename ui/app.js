@@ -26,6 +26,8 @@ const ACTIONS = {
   update: { busy: "Güncelleniyor…", verb: "güncelleniyor", done: "Güncelleme tamamlandı." },
   remove: { busy: "Kaldırılıyor…", verb: "kaldırılıyor", done: "Kaldırma tamamlandı." },
 };
+const t = (key, vars) => (window.MacroI18n ? window.MacroI18n.t(key, vars) : key);
+
 const ACTION_LABELS = {
   install: "Kurulum",
   update: "Güncelleme",
@@ -36,6 +38,22 @@ const ACTION_LABELS = {
   unmask: "Güncelleme sürdürme",
   rollback: "Sürüm geri alma",
 };
+
+const ACTION_LABEL_KEYS = {
+  install: "action.install",
+  update: "action.update",
+  remove: "action.remove",
+  prune: "action.prune",
+  channel: "action.channel",
+  mask: "action.mask",
+  unmask: "action.unmask",
+  rollback: "action.rollback",
+};
+
+function actionLabel(action) {
+  const key = ACTION_LABEL_KEYS[action];
+  return key ? t(key) : ACTION_LABELS[action] || "";
+}
 const PROVIDER_NAMES = { flatpak: "Flatpak", snap: "Snap", brew: "Homebrew" };
 const PROVIDER_FILTERS = [
   { value: "all", label: "Tümü" },
@@ -815,20 +833,20 @@ function actionButtonsHtml(app, { large = false, hero = false, allowRemove = tru
   const actionAttrs = action => `data-action="${action}" data-id="${id}" data-provider="${attr(provider)}" aria-label="${attr(providerActionLabel(action, app))}"`;
 
   if (state.busy && sameApp(state.busy, provider, app.id)) {
-    const label = ACTIONS[state.busy.action]?.busy || "İşleniyor…";
+    const label = ACTIONS[state.busy.action]?.busy || t("action.busy");
     return `<button class="${primary}" type="button" disabled aria-label="${attr(providerActionLabel(state.busy.action, app))}"><span class="spinner"></span>${label}</button>`;
   }
 
   if (!app.installed) {
-    return `<button class="${primary}" type="button" ${actionAttrs("install")}${locked}>Kur</button>`;
+    return `<button class="${primary}" type="button" ${actionAttrs("install")}${locked}>${t("action.install")}</button>`;
   }
 
   const buttons = [];
   if (app.updateAvailable) {
-    buttons.push(`<button class="${primary}" type="button" ${actionAttrs("update")}${locked}>Güncelle</button>`);
+    buttons.push(`<button class="${primary}" type="button" ${actionAttrs("update")}${locked}>${t("action.update")}</button>`);
   }
   if (allowRemove) {
-    buttons.push(`<button class="${ghost}" type="button" ${actionAttrs("remove")}${locked}>Kaldır</button>`);
+    buttons.push(`<button class="${ghost}" type="button" ${actionAttrs("remove")}${locked}>${t("action.remove")}</button>`);
   }
   return buttons.join("");
 }
@@ -1445,7 +1463,7 @@ async function runSetupInstall() {
 function updateStatus() {
   if (!state.storeInfo) {
     els.statusDot.className = "status-dot is-pending";
-    els.statusText.textContent = "Flatpak denetleniyor…";
+    els.statusText.textContent = t("status.checking");
     return;
   }
   if (!state.storeInfo.flatpakAvailable) {
@@ -1789,7 +1807,7 @@ function recordActivity({ action, app = null, name = "", ok = true, message = ""
   if (!ACTION_LABELS[action] && !name) return;
   const entry = {
     action: ACTION_LABELS[action] ? action : "batch",
-    label: ACTION_LABELS[action] || "Toplu işlem",
+    label: ACTION_LABELS[action] ? actionLabel(action) : t("action.batch"),
     name: name || app?.name || app?.id || "",
     id: app?.id || "",
     provider: app ? appProvider(app) : "",
@@ -2223,7 +2241,7 @@ function renderDiscover() {
       <header class="view-head">
         <div class="view-title">
           <p class="eyebrow">Flathub</p>
-          <h1>Keşfet</h1>
+          <h1>${t("nav.discover")}</h1>
         </div>
       </header>
       ${stateHtml({
@@ -2297,8 +2315,8 @@ function renderDiscover() {
     <header class="view-head">
       <div class="view-title">
         <p class="eyebrow">Flathub</p>
-        <h1>Keşfet</h1>
-        <p class="view-sub">Öne çıkan uygulamalar, haftanın seçkileri ve yeni eklenenler.</p>
+        <h1>${t("nav.discover")}</h1>
+        <p class="view-sub">${t("view.discover.sub")}</p>
       </div>
       <p class="view-note">${escapeHtml(formatISODate(data.date))}</p>
     </header>
@@ -2374,9 +2392,9 @@ function renderSearch() {
   els.searchView.innerHTML = `
     <header class="view-head">
       <div class="view-title">
-        <p class="eyebrow">Arama</p>
+        <p class="eyebrow">${t("view.search.eyebrow")}</p>
         <h1>“${escapeHtml(query)}”</h1>
-        <p class="view-sub">Flatpak, Snap ve Homebrew kataloglarında arama.</p>
+        <p class="view-sub">${t("view.search.sub")}</p>
       </div>
       ${controls}
     </header>
@@ -2389,10 +2407,10 @@ function renderCategories() {
     <header class="view-head">
       <div class="view-title">
         <p class="eyebrow">Flathub</p>
-        <h1>Kategoriler</h1>
-        <p class="view-sub">İlgi alanınıza göre uygulamalara göz atın.</p>
+        <h1>${t("nav.categories")}</h1>
+        <p class="view-sub">${t("view.categories.sub")}</p>
       </div>
-      <p class="view-note">${CATEGORY_LIST.length} kategori</p>
+      <p class="view-note">${t("view.categories.count", { count: CATEGORY_LIST.length })}</p>
     </header>
     <div class="category-grid">
       ${CATEGORY_LIST.map(category => `
@@ -2481,8 +2499,8 @@ function renderFavorites() {
   els.favoritesView.innerHTML = `
     <header class="view-head">
       <div class="view-title">
-        <p class="eyebrow">Kitaplık</p>
-        <h1>Favoriler</h1>
+        <p class="eyebrow">${t("view.favorites.eyebrow")}</p>
+        <h1>${t("view.favorites.title")}</h1>
         <p class="view-sub">${escapeHtml(summary)}</p>
       </div>
       ${apps.length ? `<div class="view-tools">
@@ -2588,14 +2606,14 @@ function renderInstalled() {
   els.installedView.innerHTML = `
     <header class="view-head">
       <div class="view-title">
-        <p class="eyebrow">Kitaplık</p>
-        <h1>Yüklü Uygulamalar</h1>
+        <p class="eyebrow">${t("view.favorites.eyebrow")}</p>
+        <h1>${t("nav.installed")}</h1>
         <p class="view-sub">${escapeHtml(summaryText)}${refreshedText ? `<span class="dot">·</span>${escapeHtml(refreshedText)}` : ""}</p>
       </div>
       ${state.installed.length ? `<div class="view-tools">
         <label class="library-search">
           ${ICON.search}
-          <input type="search" data-installed-search value="${attr(state.installedQuery)}" placeholder="Kitaplıkta ara" aria-label="Yüklü uygulamalarda ara" autocomplete="off" spellcheck="false" />
+          <input type="search" data-installed-search value="${attr(state.installedQuery)}" placeholder="${t("search.placeholder")}" aria-label="${t("search.label")}" autocomplete="off" spellcheck="false" />
         </label>
         ${state.selectionMode ? `<div class="selection-actions">
           <span class="selection-count">${selectedApps.length} seçili</span>
@@ -3051,6 +3069,19 @@ function snapChannelHtml(app) {
   </section>`;
 }
 
+function currentLang() {
+  return window.MacroI18n ? window.MacroI18n.lang : "tr";
+}
+
+function languageOptionsHtml() {
+  const active = currentLang();
+  const codes = window.MacroI18n ? window.MacroI18n.SUPPORTED : ["tr"];
+  return codes.map(code => `
+        <button class="theme-card${code === active ? " is-active" : ""}" type="button" data-lang-choice="${attr(code)}" aria-pressed="${code === active}">
+          <span class="theme-label"><strong>${escapeHtml(t(`settings.language.${code}`))}</strong><span>${escapeHtml(code.toUpperCase())}</span></span>
+        </button>`).join("");
+}
+
 function renderSettings() {
   const theme = currentTheme();
   let repoBody;
@@ -3145,42 +3176,52 @@ function renderSettings() {
             <time datetime="${new Date(entry.time).toISOString()}">${escapeHtml(activityTime(entry.time))}</time>
           </li>`).join("")}
       </ul>
-      <button class="btn btn-ghost" type="button" data-clear-activity>Geçmişi temizle</button>`
-    : '<div class="repo-empty">Henüz işlem geçmişi yok. Kurulum, güncelleme ve kaldırma işlemleri burada listelenir.</div>';
+      <button class="btn btn-ghost" type="button" data-clear-activity>${t("settings.clearActivity")}</button>`
+    : `<div class="repo-empty">${t("settings.activityEmpty")}</div>`;
 
   els.settingsView.innerHTML = `
     <header class="view-head">
       <div class="view-title">
         <p class="eyebrow">Macro Store</p>
-        <h1>Seçenekler</h1>
-        <p class="view-sub">Görünümü ve uygulama kaynaklarını yönetin.</p>
+        <h1>${t("nav.settings")}</h1>
+        <p class="view-sub">${t("view.settings.sub")}</p>
       </div>
-      <p class="view-note">Sürüm 0.3.0</p>
+      <p class="view-note">${t("view.settings.version", { version: "0.3.0" })}</p>
     </header>
 
     ${storeNoticeHtml()}
 
     <section class="settings-section">
       <div class="settings-head">
-        <h2>Görünüm</h2>
-        <p>Göz yormayan açık tonlar ya da koyu mağaza görünümü arasında geçiş yapın.</p>
+        <h2>${t("settings.appearance")}</h2>
+        <p>${t("settings.appearanceDesc")}</p>
       </div>
       <div class="theme-grid">
         <button class="theme-card${theme === "light" ? " is-active" : ""}" type="button" data-theme-choice="light" aria-pressed="${theme === "light"}">
           <span class="theme-preview light" aria-hidden="true"></span>
-          <span class="theme-label"><strong>Açık tema</strong><span>Yumuşak, aydınlık tonlar</span></span>
+          <span class="theme-label"><strong>${t("settings.themeLight")}</strong><span>${t("settings.themeLightDesc")}</span></span>
         </button>
         <button class="theme-card${theme === "dark" ? " is-active" : ""}" type="button" data-theme-choice="dark" aria-pressed="${theme === "dark"}">
           <span class="theme-preview dark" aria-hidden="true"></span>
-          <span class="theme-label"><strong>Koyu tema</strong><span>Düşük ışıkta rahat kullanım</span></span>
+          <span class="theme-label"><strong>${t("settings.themeDark")}</strong><span>${t("settings.themeDarkDesc")}</span></span>
         </button>
       </div>
     </section>
 
     <section class="settings-section">
       <div class="settings-head">
-        <h2>Sistem hazırlığı</h2>
-        <p>Flatpak kullanıcı kapsamında kurulur. Snap sistem kapsamında yönetilir; Homebrew kendi paket yöneticisini kullanır. Burada yalnızca algılanan kullanılabilirlik gösterilir.</p>
+        <h2>${t("settings.language")}</h2>
+        <p>${t("settings.languageDesc")}</p>
+      </div>
+      <div class="theme-grid">
+        ${languageOptionsHtml()}
+      </div>
+    </section>
+
+    <section class="settings-section">
+      <div class="settings-head">
+        <h2>${t("settings.setup")}</h2>
+        <p>${t("settings.setupDesc")}</p>
       </div>
       <div class="system-status">
         <div class="system-row">
@@ -3202,8 +3243,8 @@ function renderSettings() {
 
     <section class="settings-section">
       <div class="settings-head">
-        <h2>Depolar</h2>
-        <p>Flathub varsayılan kaynaktır. Kullanıcı kapsamına özel Flatpak depoları ekleyebilirsiniz.</p>
+        <h2>${t("settings.remotes")}</h2>
+        <p>${t("settings.remotesDesc")}</p>
       </div>
       ${repoBody}
       <form id="repoForm" class="repo-form" autocomplete="off">
@@ -3215,24 +3256,24 @@ function renderSettings() {
 
     <section class="settings-section">
       <div class="settings-head">
-        <h2>İşlem geçmişi</h2>
-        <p>Son kurulum, güncelleme ve kaldırma işlemleri yalnızca bu cihazda saklanır.</p>
+        <h2>${t("settings.activity")}</h2>
+        <p>${t("settings.activityDesc")}</p>
       </div>
       ${activityBody}
     </section>
 
     ${brewReady ? `<section class="settings-section">
       <div class="settings-head">
-        <h2>Homebrew tap'leri</h2>
-        <p>Ek depoları yönetin. Tap eklemek ya da kaldırmak Homebrew aramalarını etkiler.</p>
+        <h2>${t("settings.taps")}</h2>
+        <p>${t("settings.tapsDesc")}</p>
       </div>
       ${brewBody}
     </section>` : ""}
 
     <section class="settings-section">
       <div class="settings-head">
-        <h2>Bakım</h2>
-        <p>Yüklü uygulamaların artık ihtiyaç duymadığı Flatpak çalışma zamanlarını kaldırın.</p>
+        <h2>${t("settings.maintenance")}</h2>
+        <p>${t("settings.maintenanceDesc")}</p>
       </div>
       <div class="settings-actions">
         <button class="btn btn-ghost" type="button" data-prune-runtimes${pruneBusy ? " disabled" : ""}>
@@ -3591,7 +3632,7 @@ function scrollLogToEnd() {
 }
 
 function updateLogCount() {
-  els.logCount.textContent = `${state.logs.length} satır`;
+  els.logCount.textContent = t("log.lines", { count: state.logs.length });
 }
 
 function renderLog() {
@@ -4167,6 +4208,12 @@ function bindEvents() {
       return;
     }
 
+    const langChoice = target.closest("[data-lang-choice]");
+    if (langChoice) {
+      if (window.MacroI18n) window.MacroI18n.setLang(langChoice.dataset.langChoice);
+      return;
+    }
+
     const nav = target.closest("[data-nav]");
     if (nav) {
       const page = nav.dataset.nav;
@@ -4445,6 +4492,11 @@ async function init() {
   } catch {
     /* Günlük olayları kullanılamıyorsa arayüz çalışmaya devam eder. */
   }
+
+  document.addEventListener("macro-lang-change", () => {
+    renderRoute();
+    loadStoreInfo();
+  });
 
   loadStoreInfo();
   loadInstalled(true, true);

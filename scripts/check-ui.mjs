@@ -20,6 +20,16 @@ for (const file of readdirSync(ui).filter(name => name.endsWith(".js"))) {
   }
 }
 
+const i18n = readFileSync(join(ui, "i18n.js"), "utf8");
+const i18nKeys = new Set([...i18n.matchAll(/^\s*"([A-Za-z0-9_.]+)":/gm)].map(match => match[1]));
+const usedKeys = new Set([
+  ...[...html.matchAll(/data-i18n(?:-title|-aria|-placeholder)?="([^"]+)"/g)].map(match => match[1]),
+  ...[...js.matchAll(/\bt\(\s*"([A-Za-z0-9_.]+)"/g)].map(match => match[1]),
+]);
+for (const key of usedKeys) {
+  if (!i18nKeys.has(key)) failures.push(`i18n.js: "${key}" anahtarı eksik`);
+}
+
 const ids = new Set([
   ...[...html.matchAll(/\sid="([^"]+)"/g)].map(match => match[1]),
   ...[...js.matchAll(/\sid="([A-Za-z0-9_-]+)"/g)].map(match => match[1]),
@@ -54,4 +64,4 @@ if (failures.length) {
   process.exit(1);
 }
 
-console.log(`✓ UI wiring ok — ${lookups.size} id, ${htmlClasses.size} sınıf, ${cssClasses.size} CSS sınıfı`);
+console.log(`✓ UI wiring ok — ${lookups.size} id, ${htmlClasses.size} sınıf, ${cssClasses.size} CSS sınıfı, ${usedKeys.size} i18n anahtarı`);
