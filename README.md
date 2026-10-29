@@ -46,7 +46,16 @@ kurmak için çağrılır.
   ayrıntılarında gösterilir.
 - **Yenile** sağlayıcı önbelleklerini temizler; normal listeleme 15 saniyelik
   kısa bir önbellek kullanır.
+- Sürüm geri alma: Flatpak uzak günlüğünden son sürümler listelenir ve seçilen
+  commit'e dönülebilir.
+- Flatpak uygulama güncellemeleri maskelenebilir; maskeli uygulamalar kitaplıkta
+  ayrı işaretlenir.
+- Sistem tepsisi simgesi bekleyen güncelleme sayısını gösterir; tepsi menüsünden
+  mağaza açılabilir ya da güncellemeler denetlenebilir.
+- Çevrimdışıyken son yüklü uygulama listesi önbellekten gösterilir.
 - Açık ve koyu tema; seçim yerel olarak saklanır
+- Türkçe ve İngilizce arayüz; dil seçimi yerel olarak saklanır
+- `macro-store://` derin bağlantıları: uygulama ayrıntısı ve arama
 - Depo yönetimi: Flathub korunur, özel Flatpak kullanıcı depoları eklenebilir
 - Adwaita Sans fontu uygulamaya gömülüdür; harici font isteği yapılmaz
 
@@ -214,6 +223,30 @@ Release'e yükler. Her CI çalışması üretilen `.deb`, `.rpm` ve AppImage dos
 
 Yayın tetikleyicisi için etiket sürümü `src-tauri/Cargo.toml` ve
 `src-tauri/tauri.conf.json` içindeki sürümle aynı olmalıdır.
+
+`RELEASE_GPG_PRIVATE_KEY` (ve isteğe bağlı `RELEASE_GPG_PASSPHRASE`) deposu
+sırrı tanımlıysa `SHA256SUMS` dosyası imzalanır ve `SHA256SUMS.asc` ile
+`RELEASE-KEY.asc` yayına eklenir. İndirilen paketler şöyle doğrulanır:
+
+```bash
+gpg --import RELEASE-KEY.asc
+gpg --verify SHA256SUMS.asc SHA256SUMS
+sha256sum -c SHA256SUMS
+```
+
+## Derin bağlantılar
+
+Mağaza `macro-store://` şemasını kaydeder (Linux paketlerinde `.desktop` dosyası,
+Windows'ta kayıt defteri, macOS'ta URL şeması):
+
+```bash
+macro-store://app/org.mozilla.firefox
+macro-store://app/org.mozilla.firefox?provider=snap
+macro-store://search?q=video%20editor
+```
+
+Geçersiz uygulama kimlikleri yok sayılır. Bağlantı mağaza kapalıyken açılırsa
+hedef ilk açılışta işlenir.
 
 ## Paket üretme
 
