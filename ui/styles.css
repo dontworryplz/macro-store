@@ -3070,7 +3070,7 @@ kbd {
 }
 
 /* ═══════════════════════════════════════════════════════
-   0.4.0 · Çoklu kaynak, renk temaları, düşük güç modu
+   0.5.0 · Çoklu kaynak, renk temaları, düşük güç modu
    ═══════════════════════════════════════════════════════ */
 
 /* ── Renk temaları ─────────────────────────────────── */
@@ -3487,7 +3487,7 @@ html[data-low-power="1"] .pick-card {
   content-visibility: auto;
 }
 
-/* ── 0.4.0 yardımcı yerleşimler ───────────────────── */
+/* ── 0.5.0 yardımcı yerleşimler ───────────────────── */
 
 .view-head-actions {
   display: flex;

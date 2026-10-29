@@ -1,6 +1,6 @@
 # Maintainer: Macro Store <macro-store@example.invalid>
 pkgname=macro-store
-pkgver=0.4.0
+pkgver=0.5.0
 pkgrel=1
 pkgdesc="Flatpak, Snap, Homebrew ve AppImage destekli Linux uygulama mağazası"
 arch=('x86_64')
@@ -18,7 +18,7 @@ optdepends=(
 provides=('macro-store')
 conflicts=('macro-store-bin')
 # Yerel üretim için sürüm arşivini bu dizine bırakın:
-#   git archive --format=tar.gz --prefix=macro-store-0.4.0/ -o macro-store-0.4.0.tar.gz HEAD
+#   git archive --format=tar.gz --prefix=macro-store-0.5.0/ -o macro-store-0.5.0.tar.gz HEAD
 # Yayın arşivi kullanılacaksa sha256sums güncellenmelidir.
 source=("$pkgname-$pkgver.tar.gz")
 sha256sums=('SKIP')

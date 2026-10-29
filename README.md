@@ -172,15 +172,15 @@ Proje kökünde çalışmaya hazır üç paket bulunur:
 
 ```bash
 # Debian / Ubuntu
-sudo apt install ./MacroStore_0.4.0_amd64.deb
+sudo apt install ./MacroStore_0.5.0_amd64.deb
 
 # Fedora / RHEL / openSUSE
-sudo dnf install ./MacroStore-0.4.0-1.x86_64.rpm
+sudo dnf install ./MacroStore-0.5.0-1.x86_64.rpm
 # veya
-sudo zypper install ./MacroStore-0.4.0-1.x86_64.rpm
+sudo zypper install ./MacroStore-0.5.0-1.x86_64.rpm
 
 # Arch Linux / Manjaro
-sudo pacman -U ./macro-store-0.4.0-1-x86_64.pkg.tar.zst
+sudo pacman -U ./macro-store-0.5.0-1-x86_64.pkg.tar.zst
 ```
 
 Kurulumdan sonra uygulamayı uygulama menüsünden veya terminalden açın:
@@ -192,7 +192,7 @@ macro-store
 Paket bütünlüğünü doğrulamak için:
 
 ```bash
-sha256sum -c MacroStore_0.4.0.sha256
+sha256sum -c MacroStore_0.5.0.sha256
 ```
 
 ## Hazır AppImage
@@ -200,15 +200,15 @@ sha256sum -c MacroStore_0.4.0.sha256
 Proje kökündeki taşınabilir AppImage sürümü:
 
 ```bash
-chmod +x MacroStore_0.4.0_amd64.AppImage
-./MacroStore_0.4.0_amd64.AppImage
+chmod +x MacroStore_0.5.0_amd64.AppImage
+./MacroStore_0.5.0_amd64.AppImage
 ```
 
 AppImage; GTK 3 ve WebKitGTK 4.1 kütüphanelerini kendi içinde taşır. Sistemde
 FUSE yoksa:
 
 ```bash
-APPIMAGE_EXTRACT_AND_RUN=1 ./MacroStore_0.4.0_amd64.AppImage
+APPIMAGE_EXTRACT_AND_RUN=1 ./MacroStore_0.5.0_amd64.AppImage
 ```
 
 ## Geliştirme
@@ -287,8 +287,8 @@ birimi kullanır; en küçük ikili dosya boyutu yerine çalıştırma performan
 Çıktılar:
 
 ```
-src-tauri/target/release/bundle/deb/Macro Store_0.4.0_amd64.deb
-src-tauri/target/release/bundle/rpm/Macro Store-0.4.0-1.x86_64.rpm
+src-tauri/target/release/bundle/deb/Macro Store_0.5.0_amd64.deb
+src-tauri/target/release/bundle/rpm/Macro Store-0.5.0-1.x86_64.rpm
 ```
 
 AppImage isteğe bağlı olarak ayrıca üretilebilir:
@@ -300,7 +300,7 @@ cargo tauri build --bundles appimage
 Çıktı:
 
 ```
-src-tauri/target/release/bundle/appimage/Macro Store_0.4.0_amd64.AppImage
+src-tauri/target/release/bundle/appimage/Macro Store_0.5.0_amd64.AppImage
 ```
 
 ## Proje yapısı

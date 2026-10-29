@@ -17,7 +17,7 @@ const UPDATE_WATCH_INTERVAL = 30 * 60 * 1000;
 const ACTIVITY_KEY = "macro-activity";
 const ACTIVITY_LIMIT = 25;
 const LIBRARY_PREFS_KEY = "macro-library-prefs";
-const APP_VERSION = "0.4.0";
+const APP_VERSION = "0.5.0";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
