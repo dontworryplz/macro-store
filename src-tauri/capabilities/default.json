@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Macro Store ana penceresi için varsayılan yetkiler",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "deep-link:default"]
 }

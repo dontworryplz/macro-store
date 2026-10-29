@@ -1528,6 +1528,24 @@ function navForRoute(route) {
   }
 }
 
+function openDeepLink(target) {
+  if (!target || typeof target !== "object") return;
+  if (target.kind === "app" && typeof target.id === "string" && target.id) {
+    const provider = target.provider || "flatpak";
+    els.main.scrollTop = 0;
+    navigate({ name: "detail", id: target.id, provider }, { root: true });
+    loadDetail(target.id, provider);
+    return;
+  }
+  if (target.kind === "search" && typeof target.query === "string") {
+    const query = target.query.trim();
+    if (!query) return;
+    els.searchInput.value = query;
+    navigate({ name: "search", query }, { root: true });
+    runSearch(query);
+  }
+}
+
 function navigate(route, { root = false, replace = false } = {}) {
   const previous = state.route;
   const same = route.name === previous.name
@@ -4415,6 +4433,7 @@ async function init() {
   setTheme(currentTheme());
 
   try {
+    await listen("deep-link-open", event => openDeepLink(event.payload));
     await listen("app-log", event => appendLog(event.payload));
     await listen("setup-log", event => appendSetupLog(event.payload));
     await listen("tray-check-updates", () => {
@@ -4432,6 +4451,11 @@ async function init() {
   loadDiscover();
   renderRoute();
   maybeOpenSetup();
+  invoke("take_pending_deep_link")
+    .then(target => {
+      if (target) openDeepLink(target);
+    })
+    .catch(() => {});
 }
 
 /* ── Tarayıcı önizlemesi için sahte arka uç ────────── */
@@ -5115,6 +5139,10 @@ async function mockInvoke(command, args = {}) {
       totalBytes: apps.length * 120 * 1024 * 1024,
       apps: apps.length,
     };
+  }
+
+  if (command === "take_pending_deep_link") {
+    return null;
   }
 
   if (command === "flatpak_commits") {

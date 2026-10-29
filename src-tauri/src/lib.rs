@@ -2,6 +2,8 @@ mod brew;
 mod snap;
 mod tray;
 
+use tauri_plugin_deep_link::DeepLinkExt;
+
 use base64::Engine as _;
 use futures::future::join_all;
 use serde::de::DeserializeOwned;
@@ -18,7 +20,7 @@ use std::sync::{
     Arc, Mutex, OnceLock,
 };
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, BufReader as AsyncBufReader};
 use tokio::process::Command as AsyncCommand;
 
@@ -3340,11 +3342,166 @@ async fn update_app(
     run_app_action(app, id, provider, ActionKind::Update).await
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct DeepLinkTarget {
+    kind: String,
+    id: Option<String>,
+    provider: Option<String>,
+    query: Option<String>,
+}
+
+static PENDING_DEEP_LINK: Mutex<Option<DeepLinkTarget>> = Mutex::new(None);
+
+fn valid_app_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && !value.starts_with('-')
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'+' | b'-' | b'@')
+        })
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).unwrap_or("");
+            if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                out.push(byte);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(if bytes[index] == b'+' {
+            b' '
+        } else {
+            bytes[index]
+        });
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
+fn query_param(query: &str, key: &str) -> Option<String> {
+    query.split('&').find_map(|pair| {
+        let (name, value) = pair.split_once('=')?;
+        if name.eq_ignore_ascii_case(key) {
+            Some(percent_decode(value))
+        } else {
+            None
+        }
+    })
+}
+
+fn parse_deep_link(raw: &str) -> Option<DeepLinkTarget> {
+    let trimmed = raw.trim();
+    let rest = trimmed
+        .strip_prefix("macro-store://")
+        .or_else(|| trimmed.strip_prefix("MACRO-STORE://"))
+        .or_else(|| trimmed.strip_prefix("Macro-Store://"))?;
+
+    let (path, query) = match rest.split_once('?') {
+        Some((path, query)) => (path, query),
+        None => (rest, ""),
+    };
+    let mut segments = path.split('/').filter(|segment| !segment.is_empty());
+    let head = segments.next()?;
+
+    match head {
+        "app" => {
+            let id = percent_decode(segments.next()?);
+            if !valid_app_token(&id) {
+                return None;
+            }
+            let provider = query_param(query, "provider")
+                .map(|value| value.to_ascii_lowercase())
+                .filter(|value| matches!(value.as_str(), "flatpak" | "snap" | "brew"));
+            Some(DeepLinkTarget {
+                kind: "app".to_string(),
+                id: Some(id),
+                provider,
+                query: None,
+            })
+        }
+        "search" => {
+            let raw_query = segments.next().map(percent_decode);
+            let query = query_param(query, "q")
+                .or(raw_query)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            if query.is_empty() || query.len() > 128 {
+                return None;
+            }
+            Some(DeepLinkTarget {
+                kind: "search".to_string(),
+                id: None,
+                provider: None,
+                query: Some(query),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn dispatch_deep_link(app: &AppHandle, raw: &str) {
+    let Some(target) = parse_deep_link(raw) else {
+        return;
+    };
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+    let _ = app.emit("deep-link-open", target);
+}
+
+fn setup_deep_links(app: &AppHandle) {
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    {
+        let _ = app.deep_link().register_all();
+    }
+
+    if let Ok(Some(urls)) = app.deep_link().get_current() {
+        for url in urls {
+            if let Some(target) = parse_deep_link(url.as_str()) {
+                if let Ok(mut pending) = PENDING_DEEP_LINK.lock() {
+                    *pending = Some(target);
+                }
+                break;
+            }
+        }
+    }
+
+    let handle = app.clone();
+    app.deep_link().on_open_url(move |event| {
+        for url in event.urls() {
+            if parse_deep_link(url.as_str()).is_some() {
+                dispatch_deep_link(&handle, url.as_str());
+                return;
+            }
+        }
+    });
+}
+
+#[tauri::command]
+fn take_pending_deep_link() -> Option<DeepLinkTarget> {
+    PENDING_DEEP_LINK
+        .lock()
+        .ok()
+        .and_then(|mut pending| pending.take())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_deep_link::init())
         .setup(|app| {
             tray::setup(app.handle())?;
+            setup_deep_links(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -3373,6 +3530,7 @@ pub fn run() {
             update_app,
             flatpak_commits,
             rollback_flatpak_app,
+            take_pending_deep_link,
             tray::set_tray_updates
         ])
         .run(tauri::generate_context!())
@@ -3393,6 +3551,26 @@ mod tests {
         assert_eq!(apps[0].version, "1.0");
         assert_eq!(apps[1].summary, "Editor for notes");
         assert_eq!(apps[1].version, "2.4");
+    }
+
+    #[test]
+    fn deep_links_parse_app_and_search_targets() {
+        let app = parse_deep_link("macro-store://app/org.gimp.GIMP").expect("app link");
+        assert_eq!(app.kind, "app");
+        assert_eq!(app.id.as_deref(), Some("org.gimp.GIMP"));
+        assert_eq!(app.provider, None);
+
+        let snap = parse_deep_link("macro-store://app/firefox?provider=snaP").expect("snap link");
+        assert_eq!(snap.provider.as_deref(), Some("snap"));
+
+        let search = parse_deep_link("macro-store://search?q=video%20editor").expect("search");
+        assert_eq!(search.kind, "search");
+        assert_eq!(search.query.as_deref(), Some("video editor"));
+
+        assert!(parse_deep_link("macro-store://app/-bad").is_none());
+        assert!(parse_deep_link("macro-store://nope/x").is_none());
+        assert!(parse_deep_link("https://example.com/app/x").is_none());
+        assert!(parse_deep_link("macro-store://search?q=").is_none());
     }
 
     #[test]

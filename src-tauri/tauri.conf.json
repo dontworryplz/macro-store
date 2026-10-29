@@ -7,6 +7,13 @@
   "build": {
     "frontendDist": "../ui"
   },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["macro-store"]
+      }
+    }
+  },
   "app": {
     "withGlobalTauri": true,
     "windows": [
