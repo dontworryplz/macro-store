@@ -166,6 +166,13 @@ düğmesiyle içe aktarılır:
 Paketler, Tauri'nin ürettiği bağımlılık listesiyle birlikte gelir. `.deb` ve
 `.rpm` kurulumları sistemdeki WebKitGTK 4.1 ve GTK 3 kütüphanelerini kullanır.
 
+Yayın ikilileri taban `x86-64` hedefiyle derlenir; `-C target-cpu=native` ile
+üretilen yapılar AVX-512 gibi bu hedefte bulunmayan yönergeler içerebilir ve
+eski işlemcilerde `SIGILL (Yönerge kuraldışı)` ile çökebilir. Son kullanıcıya
+verilen AppImage ya da ön derlenmiş paketler bu bayrakla derlenmemelidir.
+Arch paketi (`packaging/arch/PKGBUILD`) kaynaktan derlediği için kullanıcının
+kendi işlemcisine uygun kod üretir.
+
 ## Hazır paketler
 
 Proje kökünde çalışmaya hazır üç paket bulunur:

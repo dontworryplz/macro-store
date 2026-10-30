@@ -17,6 +17,7 @@ jobs:
     env:
       RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_GPG_PRIVATE_KEY }}
       RELEASE_SIGNING_PASSPHRASE: ${{ secrets.RELEASE_GPG_PASSPHRASE }}
+      RUSTFLAGS: "-C target-cpu=x86-64"
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
