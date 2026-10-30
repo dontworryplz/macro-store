@@ -11,6 +11,20 @@ Homebrew desteklenen sistemlerde ayrı sağlayıcılar olarak aranabilir ve
 yönetilebilir; sistem paket yöneticisi yalnızca ilk kurulumda eksik Flatpak'ı
 kurmak için çağrılır.
 
+## Ekran görüntüleri
+
+Görüntüler, mağazanın gerçek Flathub verisiyle çalışan önizlemesinden alınmıştır.
+
+<table>
+<tr><td><img src="docs/screenshots/01-kesfet.png" alt="Keşfet" width="100%"><br><sub>Keşfet</sub></td><td><img src="docs/screenshots/02-kategoriler.png" alt="Kategoriler" width="100%"><br><sub>Kategoriler</sub></td></tr>
+<tr><td><img src="docs/screenshots/03-arama.png" alt="Arama ve kaynak filtreleri" width="100%"><br><sub>Arama ve kaynak filtreleri</sub></td><td><img src="docs/screenshots/04-yuklu-uygulamalar.png" alt="Yüklü uygulamalar" width="100%"><br><sub>Yüklü uygulamalar</sub></td></tr>
+<tr><td><img src="docs/screenshots/05-uygulama-detayi.png" alt="Uygulama ayrıntısı" width="100%"><br><sub>Uygulama ayrıntısı</sub></td><td><img src="docs/screenshots/06-cli-komutlari.png" alt="CLI komutları" width="100%"><br><sub>CLI komutları</sub></td></tr>
+<tr><td><img src="docs/screenshots/07-favoriler.png" alt="Favoriler" width="100%"><br><sub>Favoriler</sub></td><td><img src="docs/screenshots/08-islem-gunlugu.png" alt="İşlem günlüğü" width="100%"><br><sub>İşlem günlüğü</sub></td></tr>
+<tr><td><img src="docs/screenshots/09-onay.png" alt="Kaldırma onayı" width="100%"><br><sub>Kaldırma onayı</sub></td><td><img src="docs/screenshots/10-klavye-kisayollari.png" alt="Klavye kısayolları" width="100%"><br><sub>Klavye kısayolları</sub></td></tr>
+<tr><td><img src="docs/screenshots/11-secenekler.png" alt="Seçenekler" width="100%"><br><sub>Seçenekler</sub></td><td><img src="docs/screenshots/12-appimage-import.png" alt="AppImage içe aktarma" width="100%"><br><sub>AppImage içe aktarma</sub></td></tr>
+<tr><td><img src="docs/screenshots/13-settings-en.png" alt="İngilizce arayüz" width="100%"><br><sub>İngilizce arayüz</sub></td><td></td></tr>
+</table>
+
 ## Özellikler
 
 - Tauri 2 + Rust arka uç, saf HTML/CSS/JS ön yüz (npm/bundler yok)
